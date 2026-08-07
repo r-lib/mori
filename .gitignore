@@ -10,6 +10,7 @@ src/symbols.rds
 .Rproj.user/
 *.Rproj
 compile_commands.json
+.posit/
 # pkgdown
 docs/
 # Claude Code

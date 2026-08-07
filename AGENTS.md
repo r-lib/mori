@@ -1,14 +1,24 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for AI coding agents working **on** the mori package. mori — Shared Memory for R Objects. Uses POSIX shared memory (Linux, macOS) and Win32 file mappings (Windows) with R's ALTREP framework to let multiple processes on the same machine read the same physical memory pages. No external dependencies. Requires R >= 4.3.0 (for ALTLIST). API: `share()` → ALTREP shared object, `map_shared()` → open SHM by name, `shared_name()` → extract identifier, `is_shared()` → test if shared, `prune_shared()` → remove orphaned regions of dead processes. ALTREP serialization hooks emit the `shared_name()` identifier as the wire form — transparent under `serialize()` and `mirai`.
 
-## Overview
+Claude Code users: add `.claude/CLAUDE.md` containing `@../AGENTS.md` to import this file (`.claude/` is gitignored).
 
-mori — Shared Memory for R Objects. Uses POSIX shared memory (Linux, macOS) and Win32 file mappings (Windows) with R's ALTREP framework to let multiple processes on the same machine read the same physical memory pages. No external dependencies. Requires R >= 4.3.0 (for ALTLIST). API: `share()` → ALTREP shared object, `map_shared()` → open SHM by name, `shared_name()` → extract identifier, `is_shared()` → test if shared, `prune_shared()` → remove orphaned regions of dead processes. ALTREP serialization hooks emit the `shared_name()` identifier as the wire form — transparent under `serialize()` and `mirai`.
+## Commands
 
-## Development Commands
+```r
+devtools::test()                                    # full suite (testthat ed 3)
+testthat::test_file("tests/testthat/test-nested.R") # single test file
+devtools::document()                                # roxygen2 -> man/, NAMESPACE
+rmarkdown::render("README.Rmd")                     # rebuild README.md
+```
 
-Standard R-package workflow (`devtools::test()`, `devtools::document()`, `R CMD build` / `R CMD check`). Run a single test file with `testthat::test_file("tests/testthat/test-nested.R")`.
+```bash
+R CMD build .
+R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
+```
+
+- `Config/build/compilation-database: true` in DESCRIPTION makes R generate `compile_commands.json` on install, so clangd C navigation works out of the box (gitignored).
 
 ## Storage Model
 
@@ -165,5 +175,6 @@ testthat edition 3. Entry point `tests/testthat.R`; tests in `tests/testthat/tes
 
 - roxygen2 with markdown support; NAMESPACE is auto-generated.
 - MIT license.
+- Version is `major.minor.patch.dev` (current dev tag `.9000`).
 - `README.md` is generated from `README.Rmd` — edit the `.Rmd` and re-knit, never edit `README.md` directly.
-- `CLAUDE.md` and `.claude/` are excluded from package builds (via `.Rbuildignore`).
+- `AGENTS.md`, `.claude/`, and `.posit/` are in `.Rbuildignore` and don't ship to CRAN.

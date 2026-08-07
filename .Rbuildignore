@@ -5,7 +5,8 @@
 ^\.cache$
 ^README\.Rmd$
 ^\.github$
-^CLAUDE\.md$
+^AGENTS\.md$
+^\.posit$
 ^_pkgdown\.yml$
 ^dev$
 ^docs$
