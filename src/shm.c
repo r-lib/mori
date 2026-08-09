@@ -471,6 +471,7 @@ int mori_shm_create(mori_shm *shm, size_t size) {
   shm->size = 0;
 
   shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name));
+  shm->pid = (unsigned int) getpid();
   int fd = mori_shm_os_open(shm->name, O_CREAT | O_EXCL | O_RDWR, 0600);
   if (fd < 0)
     return errno == EEXIST ? MORI_EEXIST : mori_err_classify(errno);
@@ -520,6 +521,7 @@ int mori_shm_open(mori_shm *shm, const char *name) {
   memcpy(shm->name, name, nl);
   shm->name[nl] = '\0';
   shm->name_len = (uint8_t) nl;
+  shm->pid = 0;                      /* consumer: never the creator */
 
   int fd = mori_shm_os_open(name, O_RDONLY, 0);
   if (fd < 0) return -1;
@@ -643,7 +645,11 @@ void mori_host_finalizer(SEXP ptr) {
 #ifdef _WIN32
     if (shm->handle != NULL) CloseHandle(shm->handle);
 #else
-    if (shm->name[0] != '\0') mori_shm_os_unlink(shm->name);
+    /* Unlink only in the creating process: a fork()ed child inherits this
+       finalizer for the parent's regions and must not destroy their names
+       (its own munmap via mori_shm_finalizer is process-local and safe). */
+    if (shm->name[0] != '\0' && shm->pid == (unsigned int) getpid())
+      mori_shm_os_unlink(shm->name);
 #ifdef __APPLE__
     mori_log_release();              /* balance the create-time append */
 #endif
