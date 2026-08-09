@@ -147,10 +147,14 @@ test_that("factor column extracted from list serializes compactly with attrs", {
 
 test_that("vec leaf beyond MORI_MAX_PATH falls back to materialization", {
   x <- 1:5
-  for (i in seq_len(70)) x <- list(x)
+  for (i in seq_len(70)) {
+    x <- list(x)
+  }
   sx <- share(x)
   deep <- sx
-  for (i in seq_len(70)) deep <- deep[[1]]
+  for (i in seq_len(70)) {
+    deep <- deep[[1]]
+  }
   expect_true(is_shared(deep))
   y <- unserialize(serialize(deep, NULL))
   expect_identical(y[], 1:5)
@@ -158,40 +162,87 @@ test_that("vec leaf beyond MORI_MAX_PATH falls back to materialization", {
 
 test_that("string leaf beyond MORI_MAX_PATH falls back to materialization", {
   x <- c("alpha", "beta", "gamma")
-  for (i in seq_len(70)) x <- list(x)
+  for (i in seq_len(70)) {
+    x <- list(x)
+  }
   sx <- share(x)
   deep <- sx
-  for (i in seq_len(70)) deep <- deep[[1]]
+  for (i in seq_len(70)) {
+    deep <- deep[[1]]
+  }
   expect_true(is_shared(deep))
   y <- unserialize(serialize(deep, NULL))
   expect_identical(y[], c("alpha", "beta", "gamma"))
 })
 
 test_that("length-1 string leaf beyond MORI_MAX_PATH unserializes as-is", {
-  # Deep nesting forces Serialized_state to materialize; the resulting
-  # STRSXP-of-1 enters Unserialize's parse branch, parse fails (the literal
-  # "alpha" is not a mori identifier), and the fallthrough at the end of
-  # Unserialize returns it unchanged.
+  # Deep nesting forces Serialized_state to materialize; the materialized
+  # STRSXP is wrapped in a length-1 VECSXP so it is never probed as an SHM
+  # identifier, and mori_string_Unserialize unwraps it.
   x <- "alpha"
-  for (i in seq_len(70)) x <- list(x)
+  for (i in seq_len(70)) {
+    x <- list(x)
+  }
   sx <- share(x)
   deep <- sx
-  for (i in seq_len(70)) deep <- deep[[1]]
+  for (i in seq_len(70)) {
+    deep <- deep[[1]]
+  }
   expect_true(is_shared(deep))
   y <- unserialize(serialize(deep, NULL))
   expect_identical(y[], "alpha")
 })
 
-test_that("sub-list beyond MORI_MAX_PATH falls back to materialization", {
-  x <- list(leaf = 1:3)
-  for (i in seq_len(70)) x <- list(x)
+test_that("deep string leaf whose content is a live identifier round-trips as data", {
+  # Regression: a materialized length-1 STRSXP whose content parses as a
+  # mori identifier must not be probed — it previously unserialized to the
+  # named region's contents (wrong object, wrong type).
+  holder <- share(1:10)
+  nm <- shared_name(holder)
+  x <- nm
+  for (i in seq_len(70)) {
+    x <- list(x)
+  }
   sx <- share(x)
   deep <- sx
-  for (i in seq_len(68)) deep <- deep[[1]]
+  for (i in seq_len(70)) {
+    deep <- deep[[1]]
+  }
+  expect_true(is_shared(deep))
+  y <- unserialize(serialize(deep, NULL))
+  expect_identical(y, nm)
+})
+
+test_that("deep string leaf naming an absent region round-trips as data", {
+  # Regression: this previously errored with "region not found".
+  x <- "/mori_1_1"
+  for (i in seq_len(70)) {
+    x <- list(x)
+  }
+  sx <- share(x)
+  deep <- sx
+  for (i in seq_len(70)) {
+    deep <- deep[[1]]
+  }
+  expect_identical(unserialize(serialize(deep, NULL)), "/mori_1_1")
+})
+
+test_that("sub-list beyond MORI_MAX_PATH falls back to materialization", {
+  x <- list(leaf = 1:3)
+  for (i in seq_len(70)) {
+    x <- list(x)
+  }
+  sx <- share(x)
+  deep <- sx
+  for (i in seq_len(68)) {
+    deep <- deep[[1]]
+  }
   expect_true(is_shared(deep))
   expect_true(is.list(deep))
   y <- unserialize(serialize(deep, NULL))
   final <- y
-  while (is.list(final) && is.null(names(final))) final <- final[[1]]
+  while (is.list(final) && is.null(names(final))) {
+    final <- final[[1]]
+  }
   expect_identical(final$leaf[], 1:3)
 })

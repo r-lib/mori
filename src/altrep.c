@@ -1230,7 +1230,9 @@ SEXP mori_prune(void) {
    mori_shm_name (the .Call): bare prefix for root standalones, prefix +
    bracketed 1-based path for sub-objects. mori_format_chain is the single
    source of truth shared with mori_shm_name. On overflow / malformed
-   chain, fall back to materialization. */
+   chain, fall back to materialization. The string class wraps materialized
+   states in a length-1 VECSXP (see mori_wrap_string_state) so that a bare
+   STRSXP state is always an identifier. */
 
 static SEXP mori_vec_Serialized_state(SEXP x) {
   SEXP data2 = R_altrep_data2(x);
@@ -1253,9 +1255,21 @@ static SEXP mori_vec_Serialized_state(SEXP x) {
   return mat;
 }
 
+/* Wrap a materialized string vector in a length-1 VECSXP so the wire form
+   is unambiguous: a bare STRSXP state is always an SHM identifier, and the
+   materialized data — whose content could itself look like an identifier —
+   is never mistaken for one. The fallback paths are cold (COW or nesting
+   beyond MORI_MAX_PATH), so the wrapper costs nothing on the hot path. */
+static SEXP mori_wrap_string_state(SEXP x) {
+  SEXP state = PROTECT(Rf_allocVector(VECSXP, 1));
+  SET_VECTOR_ELT(state, 0, x);
+  UNPROTECT(1);
+  return state;
+}
+
 static SEXP mori_string_Serialized_state(SEXP x) {
   SEXP data2 = R_altrep_data2(x);
-  if (data2 != R_NilValue) return data2;  /* COW-materialized copy */
+  if (data2 != R_NilValue) return mori_wrap_string_state(data2);
 
   SEXP data1 = R_altrep_data1(x);
   mori_str *s = (mori_str *) R_ExternalPtrAddr(data1);
@@ -1270,8 +1284,9 @@ static SEXP mori_string_Serialized_state(SEXP x) {
   SEXP mat = PROTECT(Rf_allocVector(STRSXP, n));
   for (R_xlen_t i = 0; i < n; i++)
     SET_STRING_ELT(mat, i, mori_string_elt_shm(s, i));
+  SEXP state = mori_wrap_string_state(mat);
   UNPROTECT(1);
-  return mat;
+  return state;
 }
 
 static SEXP mori_list_Serialized_state(SEXP x) {
@@ -1363,26 +1378,37 @@ static SEXP mori_open_path_c(const char *name,
   return result;
 }
 
+/* Vec and list classes: a STRSXP state is always an SHM identifier (their
+   materialized fallbacks are atomic vectors or VECSXP, never STRSXP), so a
+   probe miss means a corrupt stream. A well-formed identifier whose region
+   is gone errors inside mori_shm_open_and_wrap (corruption, not user
+   data). Any other state is materialized data, returned as-is (R restores
+   ALTREP attributes separately). The string class has its own method
+   below, since both of its wire forms are string-like. */
 static SEXP mori_Unserialize(SEXP class_info, SEXP state) {
   (void) class_info;
-  /* STRSXP state has two legitimate sources: an SHM identifier (root or
-     path-bearing) emitted by mori_*_Serialized_state, or a COW-materialized
-     ALTSTRING handed back as itself. mori_shm_open_and_wrap distinguishes
-     them by parse: parse success + region opens → opened ALTREP returned;
-     parse success + region missing → Rf_error propagates (correct: a
-     well-formed identifier whose region is gone is corruption, not user
-     data); parse failure → NULL, fall through to expanded-state handling
-     for the materialized-ALTSTRING case. The fallthrough is only for the
-     parse-failure branch — do not widen it to swallow errors from the
-     parse-success-but-missing-region branch. */
-  if (TYPEOF(state) == STRSXP && XLENGTH(state) == 1 &&
-      STRING_ELT(state, 0) != NA_STRING) {
+  if (TYPEOF(state) == STRSXP) {
+    SEXP opened = mori_shm_open_and_wrap(state);
+    if (opened != R_NilValue) return opened;
+    Rf_error("mori: invalid serialized state for a shared object");
+  }
+  return state;
+}
+
+/* String class: the identifier form is a bare STRSXP; the materialized
+   fallback is wrapped in a length-1 VECSXP (see mori_wrap_string_state).
+   The forms are disjoint by construction, so anything else is a corrupt
+   stream. */
+static SEXP mori_string_Unserialize(SEXP class_info, SEXP state) {
+  (void) class_info;
+  if (TYPEOF(state) == VECSXP && XLENGTH(state) == 1 &&
+      TYPEOF(VECTOR_ELT(state, 0)) == STRSXP)
+    return VECTOR_ELT(state, 0);
+  if (TYPEOF(state) == STRSXP) {
     SEXP opened = mori_shm_open_and_wrap(state);
     if (opened != R_NilValue) return opened;
   }
-  /* Expanded state: materialized data → return as-is
-     (R restores ALTREP attributes separately) */
-  return state;
+  Rf_error("mori: invalid serialized state for a shared string vector");
 }
 
 // ALTREP class registration ---------------------------------------------------
@@ -1444,5 +1470,5 @@ void mori_altrep_init(DllInfo *dll) {
   R_set_altstring_Elt_method(mori_string_class, mori_string_Elt);
   R_set_altrep_Serialized_state_method(mori_string_class,
                                        mori_string_Serialized_state);
-  R_set_altrep_Unserialize_method(mori_string_class, mori_Unserialize);
+  R_set_altrep_Unserialize_method(mori_string_class, mori_string_Unserialize);
 }
