@@ -181,7 +181,8 @@ test_that("map_shared() errors when vector attributes exceed the region", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  name <- write_corrupt(morh_header(REALSXP, length = 1, attrs_size = 2^40))
+  # length = 0 so the attrs_size check (not the length check) fires
+  name <- write_corrupt(morh_header(REALSXP, length = 0, attrs_size = 2^40))
   expect_error(map_shared(name), "invalid or corrupted")
 })
 
@@ -218,6 +219,8 @@ test_that("element access errors when a vector length exceeds its data", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
+  # raw(8L) pads the region so the entry's [56, 64) data claim is in bounds
+  # and the length check (not the offset check) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
     morl_entry(
@@ -225,7 +228,8 @@ test_that("element access errors when a vector length exceeds its data", {
       data_size = 8,
       sexptype = REALSXP,
       length = 2^40
-    )
+    ),
+    raw(8L)
   ))
   expect_error(map_shared(name)[[1]], "invalid element data")
 })
@@ -235,6 +239,8 @@ test_that("element access errors on a negative element attrs size", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
+  # raw(8L) pads the region so the entry's [56, 64) data claim is in bounds
+  # and the attrs_size check (not the offset check) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
     morl_entry(
@@ -243,7 +249,8 @@ test_that("element access errors on a negative element attrs size", {
       sexptype = REALSXP,
       attrs_size = -1,
       length = 1
-    )
+    ),
+    raw(8L)
   ))
   expect_error(map_shared(name)[[1]], "invalid element data")
 })
@@ -253,9 +260,17 @@ test_that("element access errors when a string table exceeds its data", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
+  # raw(8L) pads the region so the entry's [56, 64) data claim is in bounds
+  # and the string table check (not the offset check) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
-    morl_entry(data_offset = 56, data_size = 8, sexptype = STRSXP, length = 100)
+    morl_entry(
+      data_offset = 56,
+      data_size = 8,
+      sexptype = STRSXP,
+      length = 100
+    ),
+    raw(8L)
   ))
   expect_error(map_shared(name)[[1]], "invalid string data")
 })
