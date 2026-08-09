@@ -360,6 +360,7 @@ typedef struct {
   const unsigned char *table;
   const unsigned char *data;
   R_xlen_t length;
+  int64_t str_bytes;  /* size of the packed string area; bounds each entry */
   int32_t index;   /* -1 = standalone, >= 0 = element of ALTLIST */
 } mori_str;
 
@@ -369,6 +370,12 @@ static inline SEXP mori_string_elt_shm(mori_str *s, R_xlen_t i) {
          sizeof(mori_str_entry));
 
   if (e.str_length < 0) return NA_STRING;
+
+  /* Bounds-check the entry against the packed string area before reading */
+  if (e.str_offset < 0 ||
+      e.str_offset > s->str_bytes - (int64_t) e.str_length ||
+      e.str_encoding < CE_NATIVE || e.str_encoding > CE_BYTES)
+    Rf_error("mori: invalid string data");
 
   return Rf_mkCharLenCE((const char *) (s->data + e.str_offset),
                         e.str_length, (cetype_t) e.str_encoding);
@@ -424,18 +431,30 @@ static SEXP mori_string_Duplicate(SEXP x, Rboolean deep) {
   return result;
 }
 
-/* region_base: points to the offset table.
+/* region_base: points to the offset table. data_size: bytes available for
+   the table, alignment padding, and packed strings (the caller excludes any
+   trailing attributes) — the table must fit within it, and the remainder is
+   recorded as str_bytes to bound each offset-table entry at Elt time.
    keeper: SEXP kept alive via the extptr's protected slot (parent SHM). */
 static SEXP mori_make_string(const unsigned char *region_base,
-                             R_xlen_t n, SEXP keeper) {
+                             R_xlen_t n, int64_t data_size, SEXP keeper) {
+
+  if (n < 0 || data_size < 0 ||
+      n > data_size / (R_xlen_t) sizeof(mori_str_entry))
+    Rf_error("mori: invalid string data");
+
+  size_t table_size = sizeof(mori_str_entry) * (size_t) n;
+  size_t aligned = MORI_ALIGN64(table_size);
+  if (aligned > (size_t) data_size)
+    Rf_error("mori: invalid string data");
 
   mori_str *s = malloc(sizeof(mori_str));
   if (s == NULL) Rf_error("mori: allocation failure");
 
-  size_t table_size = sizeof(mori_str_entry) * (size_t) n;
   s->table = region_base;
-  s->data = region_base + MORI_ALIGN64(table_size);
+  s->data = region_base + aligned;
   s->length = n;
+  s->str_bytes = data_size - (int64_t) aligned;
   s->index = -1;
 
   SEXP ptr = PROTECT(R_MakeExternalPtr(s, mori_owned_tag, keeper));
@@ -465,7 +484,7 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
 
   if (mori_oob(data_offset, data_size, region_size))
     Rf_error("mori: invalid element data");
-  if (attrs_size > 0 && attrs_size > data_size)
+  if (attrs_size < 0 || attrs_size > data_size)
     Rf_error("mori: invalid element data");
 
   SEXP result;
@@ -476,10 +495,17 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
     ));
   } else if (sexptype == STRSXP) {
     result = PROTECT(mori_make_string(
-      base + data_offset, (R_xlen_t) length, keeper
+      base + data_offset, (R_xlen_t) length, data_size - attrs_size, keeper
     ));
     ((mori_str *) R_ExternalPtrAddr(R_altrep_data1(result)))->index = index;
   } else if (sexptype != 0) {
+    /* The claimed element data must fit within the directory entry's data
+       region (minus trailing attributes) */
+    size_t elt_size = mori_sizeof_elt(sexptype);
+    if (elt_size != 0 &&
+        (length < 0 ||
+         length > (data_size - attrs_size) / (int64_t) elt_size))
+      Rf_error("mori: invalid element data");
     result = PROTECT(mori_make_vector(
       base + data_offset, (R_xlen_t) length, sexptype, keeper
     ));
@@ -1037,6 +1063,16 @@ static SEXP mori_open_vector(SEXP shm_ptr) {
   memcpy(&length, base + 8, 8);
   memcpy(&attrs_size, base + 16, 8);
 
+  /* Validate the header against the mapped size before any data access:
+     the data block and trailing attributes must fit within the region.
+     Short-circuit order keeps the length * elt_size product overflow-free. */
+  int64_t region_size = (int64_t) shm->size;
+  size_t elt_size = mori_sizeof_elt(sexptype);
+  if (region_size < 64 || length < 0 || attrs_size < 0 ||
+      (elt_size != 0 && length > (region_size - 64) / (int64_t) elt_size) ||
+      attrs_size > region_size - 64 - length * (int64_t) elt_size)
+    Rf_error("mori: invalid or corrupted shared memory region");
+
   SEXP result = PROTECT(mori_make_vector(
     base + 64, (R_xlen_t) length, sexptype, shm_ptr
   ));
@@ -1060,8 +1096,16 @@ static SEXP mori_open_string(SEXP shm_ptr) {
   memcpy(&n, base + 8, 8);
   memcpy(&str_data_size, base + 16, 8);
 
+  /* Validate the header against the mapped size before any data access:
+     the string data and trailing attributes must fit within the region. */
+  int64_t region_size = (int64_t) shm->size;
+  if (region_size < 24 || n < 0 || str_data_size < 0 || attrs_size < 0 ||
+      str_data_size > region_size - 24 ||
+      attrs_size > region_size - 24 - str_data_size)
+    Rf_error("mori: invalid or corrupted shared memory region");
+
   SEXP result = PROTECT(mori_make_string(
-    base + 24, (R_xlen_t) n, shm_ptr
+    base + 24, (R_xlen_t) n, str_data_size, shm_ptr
   ));
 
   if (attrs_size > 0)
