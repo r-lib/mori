@@ -1,5 +1,9 @@
 # mori (development version)
 
+* Fixed type confusion on unserialize when a shared string's content resembled a shared memory identifier (e.g. a stored `shared_name()` value).
+* Fixed a forked child process (e.g. `parallel::mclapply`) unlinking the parent's live region when garbage-collecting an inherited shared object.
+* Corrupted regions now raise a clean R error on `map_shared()` or access instead of reading out of bounds or crashing R.
+
 # mori 0.2.2
 
 * Region name counters now start at a per-process random value, so a process reusing a crashed process's PID no longer collides with its orphaned regions (#50).

@@ -360,6 +360,7 @@ typedef struct {
   const unsigned char *table;
   const unsigned char *data;
   R_xlen_t length;
+  int64_t str_bytes;  /* size of the packed string area; bounds each entry */
   int32_t index;   /* -1 = standalone, >= 0 = element of ALTLIST */
 } mori_str;
 
@@ -369,6 +370,12 @@ static inline SEXP mori_string_elt_shm(mori_str *s, R_xlen_t i) {
          sizeof(mori_str_entry));
 
   if (e.str_length < 0) return NA_STRING;
+
+  /* Bounds-check the entry against the packed string area before reading */
+  if (e.str_offset < 0 ||
+      e.str_offset > s->str_bytes - (int64_t) e.str_length ||
+      e.str_encoding < CE_NATIVE || e.str_encoding > CE_BYTES)
+    Rf_error("mori: invalid string data");
 
   return Rf_mkCharLenCE((const char *) (s->data + e.str_offset),
                         e.str_length, (cetype_t) e.str_encoding);
@@ -424,18 +431,30 @@ static SEXP mori_string_Duplicate(SEXP x, Rboolean deep) {
   return result;
 }
 
-/* region_base: points to the offset table.
+/* region_base: points to the offset table. data_size: bytes available for
+   the table, alignment padding, and packed strings (the caller excludes any
+   trailing attributes) — the table must fit within it, and the remainder is
+   recorded as str_bytes to bound each offset-table entry at Elt time.
    keeper: SEXP kept alive via the extptr's protected slot (parent SHM). */
 static SEXP mori_make_string(const unsigned char *region_base,
-                             R_xlen_t n, SEXP keeper) {
+                             R_xlen_t n, int64_t data_size, SEXP keeper) {
+
+  if (n < 0 || data_size < 0 ||
+      n > data_size / (R_xlen_t) sizeof(mori_str_entry))
+    Rf_error("mori: invalid string data");
+
+  size_t table_size = sizeof(mori_str_entry) * (size_t) n;
+  size_t aligned = MORI_ALIGN64(table_size);
+  if (aligned > (size_t) data_size)
+    Rf_error("mori: invalid string data");
 
   mori_str *s = malloc(sizeof(mori_str));
   if (s == NULL) Rf_error("mori: allocation failure");
 
-  size_t table_size = sizeof(mori_str_entry) * (size_t) n;
   s->table = region_base;
-  s->data = region_base + MORI_ALIGN64(table_size);
+  s->data = region_base + aligned;
   s->length = n;
+  s->str_bytes = data_size - (int64_t) aligned;
   s->index = -1;
 
   SEXP ptr = PROTECT(R_MakeExternalPtr(s, mori_owned_tag, keeper));
@@ -465,7 +484,7 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
 
   if (mori_oob(data_offset, data_size, region_size))
     Rf_error("mori: invalid element data");
-  if (attrs_size > 0 && attrs_size > data_size)
+  if (attrs_size < 0 || attrs_size > data_size)
     Rf_error("mori: invalid element data");
 
   SEXP result;
@@ -476,10 +495,17 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
     ));
   } else if (sexptype == STRSXP) {
     result = PROTECT(mori_make_string(
-      base + data_offset, (R_xlen_t) length, keeper
+      base + data_offset, (R_xlen_t) length, data_size - attrs_size, keeper
     ));
     ((mori_str *) R_ExternalPtrAddr(R_altrep_data1(result)))->index = index;
   } else if (sexptype != 0) {
+    /* The claimed element data must fit within the directory entry's data
+       region (minus trailing attributes) */
+    size_t elt_size = mori_sizeof_elt(sexptype);
+    if (elt_size != 0 &&
+        (length < 0 ||
+         length > (data_size - attrs_size) / (int64_t) elt_size))
+      Rf_error("mori: invalid element data");
     result = PROTECT(mori_make_vector(
       base + data_offset, (R_xlen_t) length, sexptype, keeper
     ));
@@ -1037,6 +1063,16 @@ static SEXP mori_open_vector(SEXP shm_ptr) {
   memcpy(&length, base + 8, 8);
   memcpy(&attrs_size, base + 16, 8);
 
+  /* Validate the header against the mapped size before any data access:
+     the data block and trailing attributes must fit within the region.
+     Short-circuit order keeps the length * elt_size product overflow-free. */
+  int64_t region_size = (int64_t) shm->size;
+  size_t elt_size = mori_sizeof_elt(sexptype);
+  if (region_size < 64 || length < 0 || attrs_size < 0 ||
+      (elt_size != 0 && length > (region_size - 64) / (int64_t) elt_size) ||
+      attrs_size > region_size - 64 - length * (int64_t) elt_size)
+    Rf_error("mori: invalid or corrupted shared memory region");
+
   SEXP result = PROTECT(mori_make_vector(
     base + 64, (R_xlen_t) length, sexptype, shm_ptr
   ));
@@ -1060,8 +1096,16 @@ static SEXP mori_open_string(SEXP shm_ptr) {
   memcpy(&n, base + 8, 8);
   memcpy(&str_data_size, base + 16, 8);
 
+  /* Validate the header against the mapped size before any data access:
+     the string data and trailing attributes must fit within the region. */
+  int64_t region_size = (int64_t) shm->size;
+  if (region_size < 24 || n < 0 || str_data_size < 0 || attrs_size < 0 ||
+      str_data_size > region_size - 24 ||
+      attrs_size > region_size - 24 - str_data_size)
+    Rf_error("mori: invalid or corrupted shared memory region");
+
   SEXP result = PROTECT(mori_make_string(
-    base + 24, (R_xlen_t) n, shm_ptr
+    base + 24, (R_xlen_t) n, str_data_size, shm_ptr
   ));
 
   if (attrs_size > 0)
@@ -1186,7 +1230,9 @@ SEXP mori_prune(void) {
    mori_shm_name (the .Call): bare prefix for root standalones, prefix +
    bracketed 1-based path for sub-objects. mori_format_chain is the single
    source of truth shared with mori_shm_name. On overflow / malformed
-   chain, fall back to materialization. */
+   chain, fall back to materialization. The string class wraps materialized
+   states in a length-1 VECSXP (see mori_wrap_string_state) so that a bare
+   STRSXP state is always an identifier. */
 
 static SEXP mori_vec_Serialized_state(SEXP x) {
   SEXP data2 = R_altrep_data2(x);
@@ -1209,9 +1255,21 @@ static SEXP mori_vec_Serialized_state(SEXP x) {
   return mat;
 }
 
+/* Wrap a materialized string vector in a length-1 VECSXP so the wire form
+   is unambiguous: a bare STRSXP state is always an SHM identifier, and the
+   materialized data — whose content could itself look like an identifier —
+   is never mistaken for one. The fallback paths are cold (COW or nesting
+   beyond MORI_MAX_PATH), so the wrapper costs nothing on the hot path. */
+static SEXP mori_wrap_string_state(SEXP x) {
+  SEXP state = PROTECT(Rf_allocVector(VECSXP, 1));
+  SET_VECTOR_ELT(state, 0, x);
+  UNPROTECT(1);
+  return state;
+}
+
 static SEXP mori_string_Serialized_state(SEXP x) {
   SEXP data2 = R_altrep_data2(x);
-  if (data2 != R_NilValue) return data2;  /* COW-materialized copy */
+  if (data2 != R_NilValue) return mori_wrap_string_state(data2);
 
   SEXP data1 = R_altrep_data1(x);
   mori_str *s = (mori_str *) R_ExternalPtrAddr(data1);
@@ -1226,8 +1284,9 @@ static SEXP mori_string_Serialized_state(SEXP x) {
   SEXP mat = PROTECT(Rf_allocVector(STRSXP, n));
   for (R_xlen_t i = 0; i < n; i++)
     SET_STRING_ELT(mat, i, mori_string_elt_shm(s, i));
+  SEXP state = mori_wrap_string_state(mat);
   UNPROTECT(1);
-  return mat;
+  return state;
 }
 
 static SEXP mori_list_Serialized_state(SEXP x) {
@@ -1319,26 +1378,37 @@ static SEXP mori_open_path_c(const char *name,
   return result;
 }
 
+/* Vec and list classes: a STRSXP state is always an SHM identifier (their
+   materialized fallbacks are atomic vectors or VECSXP, never STRSXP), so a
+   probe miss means a corrupt stream. A well-formed identifier whose region
+   is gone errors inside mori_shm_open_and_wrap (corruption, not user
+   data). Any other state is materialized data, returned as-is (R restores
+   ALTREP attributes separately). The string class has its own method
+   below, since both of its wire forms are string-like. */
 static SEXP mori_Unserialize(SEXP class_info, SEXP state) {
   (void) class_info;
-  /* STRSXP state has two legitimate sources: an SHM identifier (root or
-     path-bearing) emitted by mori_*_Serialized_state, or a COW-materialized
-     ALTSTRING handed back as itself. mori_shm_open_and_wrap distinguishes
-     them by parse: parse success + region opens → opened ALTREP returned;
-     parse success + region missing → Rf_error propagates (correct: a
-     well-formed identifier whose region is gone is corruption, not user
-     data); parse failure → NULL, fall through to expanded-state handling
-     for the materialized-ALTSTRING case. The fallthrough is only for the
-     parse-failure branch — do not widen it to swallow errors from the
-     parse-success-but-missing-region branch. */
-  if (TYPEOF(state) == STRSXP && XLENGTH(state) == 1 &&
-      STRING_ELT(state, 0) != NA_STRING) {
+  if (TYPEOF(state) == STRSXP) {
+    SEXP opened = mori_shm_open_and_wrap(state);
+    if (opened != R_NilValue) return opened;
+    Rf_error("mori: invalid serialized state for a shared object");
+  }
+  return state;
+}
+
+/* String class: the identifier form is a bare STRSXP; the materialized
+   fallback is wrapped in a length-1 VECSXP (see mori_wrap_string_state).
+   The forms are disjoint by construction, so anything else is a corrupt
+   stream. */
+static SEXP mori_string_Unserialize(SEXP class_info, SEXP state) {
+  (void) class_info;
+  if (TYPEOF(state) == VECSXP && XLENGTH(state) == 1 &&
+      TYPEOF(VECTOR_ELT(state, 0)) == STRSXP)
+    return VECTOR_ELT(state, 0);
+  if (TYPEOF(state) == STRSXP) {
     SEXP opened = mori_shm_open_and_wrap(state);
     if (opened != R_NilValue) return opened;
   }
-  /* Expanded state: materialized data → return as-is
-     (R restores ALTREP attributes separately) */
-  return state;
+  Rf_error("mori: invalid serialized state for a shared string vector");
 }
 
 // ALTREP class registration ---------------------------------------------------
@@ -1400,5 +1470,5 @@ void mori_altrep_init(DllInfo *dll) {
   R_set_altstring_Elt_method(mori_string_class, mori_string_Elt);
   R_set_altrep_Serialized_state_method(mori_string_class,
                                        mori_string_Serialized_state);
-  R_set_altrep_Unserialize_method(mori_string_class, mori_Unserialize);
+  R_set_altrep_Unserialize_method(mori_string_class, mori_string_Unserialize);
 }

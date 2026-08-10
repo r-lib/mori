@@ -38,19 +38,19 @@ static int mori_err_classify(long code) {
   }
 }
 
-static size_t mori_shm_name(char *name, size_t size) {
+static size_t mori_shm_name(char *name, size_t size, unsigned int pid) {
   static unsigned int counter;
   static int seeded;
   if (!seeded) {
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
     counter = mori_counter_seed((uint64_t) t.QuadPart ^
-                                ((uint64_t) GetCurrentProcessId() << 40) ^
+                                ((uint64_t) pid << 40) ^
                                 (uint64_t) (uintptr_t) &counter);
     seeded = 1;
   }
   int n = snprintf(name, size, MORI_PREFIX_LITERAL "%lx_%x",
-                   (unsigned long) GetCurrentProcessId(), counter++);
+                   (unsigned long) pid, counter++);
   return (n > 0 && (size_t) n < size) ? (size_t) n : 0;
 }
 
@@ -59,11 +59,12 @@ int mori_shm_create(mori_shm *shm, size_t size) {
   shm->addr = NULL;
   shm->size = 0;
   shm->handle = NULL;
+  shm->pid = (unsigned int) GetCurrentProcessId();
 
   DWORD hi = (DWORD) ((uint64_t) size >> 32);
   DWORD lo = (DWORD) (size & 0xFFFFFFFF);
 
-  shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name));
+  shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name), shm->pid);
   HANDLE h = CreateFileMappingA(
     INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, hi, lo, shm->name
   );
@@ -96,6 +97,7 @@ int mori_shm_open(mori_shm *shm, const char *name) {
   memcpy(shm->name, name, nl);
   shm->name[nl] = '\0';
   shm->name_len = (uint8_t) nl;
+  shm->pid = 0;                      /* consumer: never the creator */
 
   HANDLE h = OpenFileMappingA(FILE_MAP_READ, FALSE, name);
   if (h == NULL) return -1;
@@ -432,7 +434,7 @@ char **mori_shm_reap(int *n) {
 
 #endif /* __linux__ || __APPLE__ */
 
-static size_t mori_shm_name(char *name, size_t size) {
+static size_t mori_shm_name(char *name, size_t size, unsigned int pid) {
   static unsigned int counter;
   static int seeded;
   if (!seeded) {
@@ -440,12 +442,11 @@ static size_t mori_shm_name(char *name, size_t size) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     counter = mori_counter_seed(((uint64_t) ts.tv_sec << 32) ^
                                 (uint64_t) ts.tv_nsec ^
-                                ((uint64_t) getpid() << 40) ^
+                                ((uint64_t) pid << 40) ^
                                 (uint64_t) (uintptr_t) &counter);
     seeded = 1;
   }
-  int n = snprintf(name, size, MORI_PREFIX_LITERAL "%x_%x",
-                   (unsigned) getpid(), counter++);
+  int n = snprintf(name, size, MORI_PREFIX_LITERAL "%x_%x", pid, counter++);
   return (n > 0 && (size_t) n < size) ? (size_t) n : 0;
 }
 
@@ -470,7 +471,8 @@ int mori_shm_create(mori_shm *shm, size_t size) {
   shm->addr = NULL;
   shm->size = 0;
 
-  shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name));
+  shm->pid = (unsigned int) getpid();
+  shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name), shm->pid);
   int fd = mori_shm_os_open(shm->name, O_CREAT | O_EXCL | O_RDWR, 0600);
   if (fd < 0)
     return errno == EEXIST ? MORI_EEXIST : mori_err_classify(errno);
@@ -520,6 +522,7 @@ int mori_shm_open(mori_shm *shm, const char *name) {
   memcpy(shm->name, name, nl);
   shm->name[nl] = '\0';
   shm->name_len = (uint8_t) nl;
+  shm->pid = 0;                      /* consumer: never the creator */
 
   int fd = mori_shm_os_open(name, O_RDONLY, 0);
   if (fd < 0) return -1;
@@ -643,7 +646,11 @@ void mori_host_finalizer(SEXP ptr) {
 #ifdef _WIN32
     if (shm->handle != NULL) CloseHandle(shm->handle);
 #else
-    if (shm->name[0] != '\0') mori_shm_os_unlink(shm->name);
+    /* Unlink only in the creating process: a fork()ed child inherits this
+       finalizer for the parent's regions and must not destroy their names
+       (its own munmap via mori_shm_finalizer is process-local and safe). */
+    if (shm->name[0] != '\0' && shm->pid == (unsigned int) getpid())
+      mori_shm_os_unlink(shm->name);
 #ifdef __APPLE__
     mori_log_release();              /* balance the create-time append */
 #endif

@@ -10,7 +10,7 @@
 
 // Identifier grammar constants ------------------------------------------------
 
-#define MORI_NAME_MAX        30                /* size of mori_shm.name; fits Windows worst case (Local\\mori_<8hex>_<8hex> = 28) + NUL with 1 byte slack, and lands name_len in mori_shm's natural tail padding (sizeof = 48 POSIX / 56 Windows) */
+#define MORI_NAME_MAX        30                /* size of mori_shm.name; fits Windows worst case (Local\\mori_<8hex>_<8hex> = 28) + NUL with 1 byte slack */
 #define MORI_MAX_PATH        64                /* max indices in a path */
 #define MORI_IDENTIFIER_MAX  1024              /* parser input length cap */
 #define MORI_FORMAT_BUFLEN   1024              /* formatter stack buffer */
@@ -28,6 +28,7 @@ typedef struct mori_shm_s {
   size_t size;
   char name[MORI_NAME_MAX];
   uint8_t name_len;                /* strlen(name); fits since MORI_NAME_MAX < 256 */
+  unsigned int pid;                /* creator PID: fork guard for the host finalizer (read on POSIX only; Windows has no fork) */
 #ifdef _WIN32
   void *handle;
 #endif
