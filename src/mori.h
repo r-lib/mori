@@ -28,7 +28,7 @@ typedef struct mori_shm_s {
   size_t size;
   char name[MORI_NAME_MAX];
   uint8_t name_len;                /* strlen(name); fits since MORI_NAME_MAX < 256 */
-  unsigned int pid;                /* creator PID: fork guard for the host finalizer (POSIX; unused on Windows) */
+  unsigned int pid;                /* creator PID: fork guard for the host finalizer (read on POSIX only; Windows has no fork) */
 #ifdef _WIN32
   void *handle;
 #endif
