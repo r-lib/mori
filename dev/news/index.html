@@ -47,7 +47,10 @@
 
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="development version" id="mori-development-version">mori (development version)<a class="anchor" aria-label="anchor" href="#mori-development-version"></a></h2>
-</div>
+<ul><li>Fixed type confusion on unserialize when a shared string’s content resembled a shared memory identifier (e.g. a stored <code><a href="../reference/shared_name.html">shared_name()</a></code> value).</li>
+<li>Fixed a forked child process (e.g. <code><a href="https://rdrr.io/r/parallel/mclapply.html" class="external-link">parallel::mclapply</a></code>) unlinking the parent’s live region when garbage-collecting an inherited shared object.</li>
+<li>Corrupted regions now raise a clean R error on <code><a href="../reference/map_shared.html">map_shared()</a></code> or access instead of reading out of bounds or crashing R.</li>
+</ul></div>
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="0.2.2" id="mori-022">mori 0.2.2<a class="anchor" aria-label="anchor" href="#mori-022"></a></h2><p class="text-muted">CRAN release: 2026-07-21</p>
 <ul><li>Region name counters now start at a per-process random value, so a process reusing a crashed process’s PID no longer collides with its orphaned regions (<a href="https://github.com/shikokuchuo/mori/issues/50" class="external-link">#50</a>).</li>
