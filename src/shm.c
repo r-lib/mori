@@ -38,7 +38,7 @@ static int mori_err_classify(long code) {
   }
 }
 
-static size_t mori_shm_name(char *name, size_t size, unsigned int pid) {
+static size_t mori_region_name(char *name, size_t size, unsigned int pid) {
   static unsigned int counter;
   static int seeded;
   if (!seeded) {
@@ -64,7 +64,7 @@ int mori_shm_create(mori_shm *shm, size_t size) {
   DWORD hi = (DWORD) ((uint64_t) size >> 32);
   DWORD lo = (DWORD) (size & 0xFFFFFFFF);
 
-  shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name), shm->pid);
+  shm->name_len = (uint8_t) mori_region_name(shm->name, sizeof(shm->name), shm->pid);
   HANDLE h = CreateFileMappingA(
     INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, hi, lo, shm->name
   );
@@ -434,7 +434,7 @@ char **mori_shm_reap(int *n) {
 
 #endif /* __linux__ || __APPLE__ */
 
-static size_t mori_shm_name(char *name, size_t size, unsigned int pid) {
+static size_t mori_region_name(char *name, size_t size, unsigned int pid) {
   static unsigned int counter;
   static int seeded;
   if (!seeded) {
@@ -472,7 +472,7 @@ int mori_shm_create(mori_shm *shm, size_t size) {
   shm->size = 0;
 
   shm->pid = (unsigned int) getpid();
-  shm->name_len = (uint8_t) mori_shm_name(shm->name, sizeof(shm->name), shm->pid);
+  shm->name_len = (uint8_t) mori_region_name(shm->name, sizeof(shm->name), shm->pid);
   int fd = mori_shm_os_open(shm->name, O_CREAT | O_EXCL | O_RDWR, 0600);
   if (fd < 0)
     return errno == EEXIST ? MORI_EEXIST : mori_err_classify(errno);

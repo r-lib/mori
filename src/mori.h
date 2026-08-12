@@ -21,6 +21,22 @@
 #define MORI_PREFIX_LITERAL  "/mori_"
 #endif
 
+// Region layout constants -----------------------------------------------------
+
+/* Region magics (first 4 bytes): atomic vector, string vector, list tree. */
+#define MORI_MAGIC_VEC   0x4D4F5248u  /* "MORH" */
+#define MORI_MAGIC_STR   0x4D4F5253u  /* "MORS" */
+#define MORI_MAGIC_LIST  0x4D4F524Cu  /* "MORL" */
+
+/* Every region layout opens with a 64-byte header. Bytes [24-63] are
+   reserved (written zero): embedders keep cross-process state there. */
+#define MORI_HEADER_SIZE 64
+
+/* External-pointer tag strings (installed once at init). */
+#define MORI_TAG_SHM   "mori_shm"
+#define MORI_TAG_HOST  "mori_host"
+#define MORI_TAG_OWNED "mori_owned"
+
 // Types -----------------------------------------------------------------------
 
 typedef struct mori_shm_s {
@@ -40,13 +56,29 @@ typedef struct mori_buf_s {
   size_t cur;
 } mori_buf;
 
+/* Embedder release callback, fired exactly once per view — at COW
+   materialization or at the view finalizer, whichever comes first. Embedded
+   as the first member of every owned-metadata struct below, so the shared
+   finalizer recovers it from any extptr addr (a struct pointer, suitably
+   converted, points to its initial member). ALTLIST views fire at the
+   finalizer only: extracted element views keep referencing the region, so a
+   list is never fully detached before the whole view tree is finalized. */
+typedef void (*mori_release_fn)(void *);
+
+typedef struct mori_owned_s {
+  mori_release_fn release;
+  void *release_arg;
+} mori_owned;
+
 typedef struct mori_vec_s {
+  mori_owned owned;
   const void *data;
   R_xlen_t length;
   int32_t index;   /* -1 = standalone, >= 0 = element of ALTLIST */
 } mori_vec;
 
 typedef struct mori_list_view_s {
+  mori_owned owned;
   unsigned char *base;       /* points to child MORL start */
   int64_t region_size;       /* bounds all reads within this region */
   int32_t n_elements;
@@ -97,6 +129,47 @@ static inline size_t mori_sizeof_elt(int type) {
 // altrep.c --------------------------------------------------------------------
 
 void mori_altrep_init(DllInfo *dll);
+
+/* Wrap constructors: the returned view's data1 pins `keeper` through its
+   protected slot; release/release_arg ride the owned metadata and fire
+   once (materialize or finalizer). Internal callers pass NULL, NULL. */
+SEXP mori_vec_wrap(const void *data, R_xlen_t length, int sexptype,
+                   SEXP keeper, mori_release_fn release, void *release_arg);
+SEXP mori_str_wrap(const unsigned char *region_base, R_xlen_t n,
+                   int64_t data_size, SEXP keeper,
+                   mori_release_fn release, void *release_arg);
+SEXP mori_list_wrap(unsigned char *base, int64_t region_size, int32_t index,
+                    SEXP keeper, mori_release_fn release, void *release_arg);
+void mori_restore_attrs(SEXP result, unsigned char *buf, size_t size);
+
+/* Layout oracle and writer for embedder-managed regions: the size pass
+   walks the tree and returns 0 for anything the layout writer must not
+   take (a non-mori ALTREP node would materialize through DATAPTR_RO; S4
+   bits do not survive the layouts). The write emits exactly
+   mori_layout_size bytes and zeroes header reserved bytes. */
+size_t mori_layout_size(SEXP x);
+void mori_layout_write(unsigned char *base, SEXP x);
+
+/* View introspection: C-level is_shared, the identifier formatter, the
+   identifier parser, and a path walk over an already-open region (keeper
+   flows to the returned view's chain). */
+int mori_view_check(SEXP x);
+SEXP mori_shm_name(SEXP x);
+int mori_parse_id(const char *s, char *name_out, size_t name_out_size,
+                  int32_t *path_out, int *path_len);
+SEXP mori_walk_path(unsigned char *base, int64_t region_size,
+                    const int32_t *path, int path_len, SEXP keeper);
+
+/* Embedder wire hooks (optional; set once at embedder load): `emit` fires
+   from the Serialized_state methods when an identifier — not a
+   materialization — is emitted for a view (the holder set then widens
+   beyond the direct peer); `resolve` fires from the identifier resolve
+   paths after the wrap, with the freshly opened consumer mapping. An
+   embedder running a cross-process lifetime protocol uses the pair to
+   flag regions on escape and to count remote references on arrival. */
+typedef void (*mori_emit_hook_fn)(SEXP view);
+typedef void (*mori_resolve_hook_fn)(SEXP view, mori_shm *shm);
+void mori_set_wire_hooks(mori_emit_hook_fn emit, mori_resolve_hook_fn resolve);
 
 // Alignment macro -------------------------------------------------------------
 
