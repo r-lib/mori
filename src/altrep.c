@@ -869,7 +869,10 @@ static size_t mori_nested_size(SEXP x, int *ok) {
 }
 
 /* Writes a complete MORL region for VECSXP x starting at base. Returns
-   total bytes written (must equal mori_nested_size(x)). */
+   total bytes written (must equal mori_nested_size(x)). Blob sizes are
+   read off the write itself — mori_serialize_into's cursor return and
+   mori_write_strings' data-size return — so the counting pass that
+   mori_nested_size already ran is never repeated here. */
 static size_t mori_nested_write(unsigned char *base, SEXP x) {
 
   R_xlen_t n = XLENGTH(x);
@@ -896,34 +899,27 @@ static size_t mori_nested_write(unsigned char *base, SEXP x) {
       UNPROTECT(1);
       cur += MORI_ALIGN64(written);
     } else if (mori_shm_eligible(type)) {
-      size_t raw_size = (type == STRSXP) ?
-        mori_string_data_size(elt) :
-        (size_t) XLENGTH(elt) * mori_sizeof_elt(type);
-
       SEXP elt_attrs = PROTECT(mori_get_attrs_for_serialize(elt));
-      size_t attrs_size = (elt_attrs != R_NilValue) ?
-        mori_serialize_count(elt_attrs) : 0;
+      size_t raw_size, attrs_size = 0;
+
+      if (type == STRSXP) {
+        raw_size = mori_write_strings(base + cur, elt);
+      } else {
+        raw_size = (size_t) XLENGTH(elt) * mori_sizeof_elt(type);
+        memcpy(base + cur, DATAPTR_RO(elt), raw_size);
+      }
+      if (elt_attrs != R_NilValue)
+        attrs_size = mori_serialize_into(base + cur + raw_size, elt_attrs);
 
       entry.sexptype = type;
       entry.attrs_size = (int32_t) attrs_size;
       entry.length = (int64_t) XLENGTH(elt);
       entry.data_size = (int64_t) (raw_size + attrs_size);
 
-      if (type == STRSXP) {
-        size_t written = mori_write_strings(base + cur, elt);
-        if (attrs_size > 0)
-          mori_serialize_into(base + cur + written, attrs_size, elt_attrs);
-      } else {
-        memcpy(base + cur, DATAPTR_RO(elt), raw_size);
-        if (attrs_size > 0)
-          mori_serialize_into(base + cur + raw_size, attrs_size, elt_attrs);
-      }
-
       UNPROTECT(1);
       cur += MORI_ALIGN64((size_t) entry.data_size);
     } else {
-      size_t elt_size = mori_serialize_count(elt);
-      mori_serialize_into(base + cur, elt_size, elt);
+      size_t elt_size = mori_serialize_into(base + cur, elt);
       entry.sexptype = 0;
       entry.attrs_size = 0;
       entry.length = 0;
@@ -936,11 +932,10 @@ static size_t mori_nested_write(unsigned char *base, SEXP x) {
   }
 
   SEXP list_attrs = PROTECT(mori_get_attrs_for_serialize(x));
-  size_t attrs_size = (list_attrs != R_NilValue) ?
-    mori_serialize_count(list_attrs) : 0;
   int64_t attrs_offset = (int64_t) cur;
-  if (attrs_size > 0)
-    mori_serialize_into(base + cur, attrs_size, list_attrs);
+  size_t attrs_size = 0;
+  if (list_attrs != R_NilValue)
+    attrs_size = mori_serialize_into(base + cur, list_attrs);
   cur += MORI_ALIGN64(attrs_size);
   UNPROTECT(1);
 
@@ -992,18 +987,23 @@ static size_t morh_size(SEXP x) {
   return MORI_HEADER_SIZE + data_size + attrs_size;
 }
 
-/* MORH write: header (reserved bytes zeroed) + bare data + attrs. */
+/* MORH write: header (reserved bytes zeroed) + bare data + attrs. Header
+   fields are written last, once the counted attr write reports its size. */
 static void morh_write(unsigned char *base, SEXP x) {
 
   int type = TYPEOF(x);
   R_xlen_t n = XLENGTH(x);
   size_t data_size = (size_t) n * mori_sizeof_elt(type);
 
-  SEXP attrs = PROTECT(mori_get_attrs_for_serialize(x));
-  size_t attrs_size = (attrs != R_NilValue) ? mori_serialize_count(attrs) : 0;
-
-  /* Zero-fill header, then write fields */
   memset(base, 0, MORI_HEADER_SIZE);
+  memcpy(base + MORI_HEADER_SIZE, DATAPTR_RO(x), data_size);
+
+  SEXP attrs = PROTECT(mori_get_attrs_for_serialize(x));
+  size_t attrs_size = 0;
+  if (attrs != R_NilValue)
+    attrs_size = mori_serialize_into(base + MORI_HEADER_SIZE + data_size,
+                                     attrs);
+
   uint32_t magic = MORI_MAGIC_VEC;
   int32_t sexptype = (int32_t) type;
   int64_t length = (int64_t) n;
@@ -1012,12 +1012,6 @@ static void morh_write(unsigned char *base, SEXP x) {
   memcpy(base + 4, &sexptype, 4);
   memcpy(base + 8, &length, 8);
   memcpy(base + 16, &as64, 8);
-
-  memcpy(base + MORI_HEADER_SIZE, DATAPTR_RO(x), data_size);
-
-  if (attrs_size > 0)
-    mori_serialize_into(base + MORI_HEADER_SIZE + data_size, attrs_size,
-                        attrs);
 
   UNPROTECT(1);
 }
@@ -1030,17 +1024,22 @@ static size_t mors_size(SEXP x) {
   return MORI_HEADER_SIZE + mori_string_data_size(x) + attrs_size;
 }
 
-/* MORS write: header (reserved bytes zeroed) + string data + attrs. */
+/* MORS write: header (reserved bytes zeroed) + string data + attrs. The
+   string write reports the exact data size, so no separate sizing walk;
+   header fields are written last, once both sizes are known. */
 static void mors_write(unsigned char *base, SEXP x) {
 
   R_xlen_t n = XLENGTH(x);
-  size_t str_size = mori_string_data_size(x);
+
+  memset(base, 0, MORI_HEADER_SIZE);
+  size_t str_size = mori_write_strings(base + MORI_HEADER_SIZE, x);
 
   SEXP attrs = PROTECT(mori_get_attrs_for_serialize(x));
-  size_t attrs_size = (attrs != R_NilValue) ? mori_serialize_count(attrs) : 0;
+  size_t attrs_size = 0;
+  if (attrs != R_NilValue)
+    attrs_size = mori_serialize_into(base + MORI_HEADER_SIZE + str_size,
+                                     attrs);
 
-  /* Write header */
-  memset(base, 0, MORI_HEADER_SIZE);
   uint32_t magic = MORI_MAGIC_STR;
   int32_t as32 = (int32_t) attrs_size;
   int64_t n64 = (int64_t) n;
@@ -1049,12 +1048,6 @@ static void mors_write(unsigned char *base, SEXP x) {
   memcpy(base + 4, &as32, 4);
   memcpy(base + 8, &n64, 8);
   memcpy(base + 16, &sd, 8);
-
-  mori_write_strings(base + MORI_HEADER_SIZE, x);
-
-  if (attrs_size > 0)
-    mori_serialize_into(base + MORI_HEADER_SIZE + str_size, attrs_size,
-                        attrs);
 
   UNPROTECT(1);
 }

@@ -112,7 +112,7 @@ void mori_err_describe(int category, const char **summary, const char **hint);
 // serialize.c -----------------------------------------------------------------
 
 size_t mori_serialize_count(SEXP object);
-void mori_serialize_into(unsigned char *dst, size_t size, SEXP object);
+size_t mori_serialize_into(unsigned char *dst, SEXP object);
 SEXP mori_unserialize_from(unsigned char *src, size_t size);
 
 static inline size_t mori_sizeof_elt(int type) {
