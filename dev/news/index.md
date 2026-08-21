@@ -5,26 +5,18 @@
 - [`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) of
   attribute-heavy objects and nested lists is faster: the write pass no
   longer re-serializes each element just to measure its size.
-
 - Region layouts now open with a 64-byte header.
-
 - Fixed type confusion on unserialize when a shared string’s content
   resembled a shared memory identifier (e.g. a stored
   [`shared_name()`](https://shikokuchuo.net/mori/dev/reference/shared_name.md)
   value).
-
 - Fixed a forked child process
   (e.g. [`parallel::mclapply`](https://rdrr.io/r/parallel/mclapply.html))
   unlinking the parent’s live region when garbage-collecting an
   inherited shared object.
-
 - Corrupted regions now raise a clean R error on
   [`map_shared()`](https://shikokuchuo.net/mori/dev/reference/map_shared.md)
   or access instead of reading out of bounds or crashing R.
-
-- Internals: the region layer (`shm.c`) no longer depends on R headers —
-  the extptr finalizers moved to `altrep.c` and its declarations split
-  into an R-free `mori_region.h` (no user-visible change).
 
 ## mori 0.2.2
 
