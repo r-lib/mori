@@ -1,7 +1,7 @@
 # mori (development version)
 
-* `share()` of attribute-heavy objects and nested lists is faster: the write pass no longer re-serializes each element just to measure its size.
 * Region layouts now open with a 64-byte header.
+* `share()` of attribute-heavy objects and nested lists is faster: the write pass no longer re-serializes each element just to measure its size.
 * Fixed type confusion on unserialize when a shared string's content resembled a shared memory identifier (e.g. a stored `shared_name()` value).
 * Fixed a forked child process (e.g. `parallel::mclapply`) unlinking the parent's live region when garbage-collecting an inherited shared object.
 * Corrupted regions now raise a clean R error on `map_shared()` or access instead of reading out of bounds or crashing R.
