@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include "mori.h"
+#include <string.h>
+#include "mori_region.h"
 
 /* Seeds the region-name counter (splitmix64 finalizer): from a fixed origin,
    a process reusing a dead creator's PID would regenerate its names and
@@ -624,38 +625,22 @@ mori_shm *mori_shm_open_heap(const char *name) {
   return shm;
 }
 
-// Platform-independent finalizers --------------------------------------------
+// Platform-independent host teardown -----------------------------------------
 
-/* Mapping finalizer (both sides): releases this side's mapping only.
-   The name (POSIX) / creator handle (Windows) is released independently
-   by mori_host_finalizer on the chained host_tag extptr — so a consumer
-   keeps reading after the host is GC'd. */
-void mori_shm_finalizer(SEXP ptr) {
-  mori_shm *shm = (mori_shm *) R_ExternalPtrAddr(ptr);
-  if (shm != NULL) {
-    mori_shm_close(shm, 0);
-    free(shm);
-    R_ClearExternalPtr(ptr);
-  }
-}
-
-/* Host-side finalizer: releases the SHM name/handle */
-void mori_host_finalizer(SEXP ptr) {
-  mori_shm *shm = (mori_shm *) R_ExternalPtrAddr(ptr);
-  if (shm != NULL) {
+/* Releases the host side of a created region — the SHM name (POSIX: unlink)
+   / creator handle (Windows) — without touching the mapping, which is
+   released separately via mori_shm_close. Unlinks only in the creating
+   process: a fork()ed child inherits this teardown for the parent's regions
+   and must not destroy their names (its own munmap via mori_shm_close is
+   process-local and safe). */
+void mori_shm_host_release(mori_shm *shm) {
 #ifdef _WIN32
-    if (shm->handle != NULL) CloseHandle(shm->handle);
+  if (shm->handle != NULL) CloseHandle(shm->handle);
 #else
-    /* Unlink only in the creating process: a fork()ed child inherits this
-       finalizer for the parent's regions and must not destroy their names
-       (its own munmap via mori_shm_finalizer is process-local and safe). */
-    if (shm->name[0] != '\0' && shm->pid == (unsigned int) getpid())
-      mori_shm_os_unlink(shm->name);
+  if (shm->name[0] != '\0' && shm->pid == (unsigned int) getpid())
+    mori_shm_os_unlink(shm->name);
 #ifdef __APPLE__
-    mori_log_release();              /* balance the create-time append */
+  mori_log_release();              /* balance the create-time append */
 #endif
 #endif
-    free(shm);
-    R_ClearExternalPtr(ptr);
-  }
 }

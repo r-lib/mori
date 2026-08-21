@@ -4,33 +4,15 @@
 #include <Rversion.h>
 #include <Rinternals.h>
 #include <R_ext/Altrep.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <string.h>
+
+#include "mori_region.h"
 
 // Identifier grammar constants ------------------------------------------------
 
-#define MORI_NAME_MAX        30                /* size of mori_shm.name; fits Windows worst case (Local\\mori_<8hex>_<8hex> = 28) + NUL with 1 byte slack */
 #define MORI_MAX_PATH        64                /* max indices in a path */
 #define MORI_IDENTIFIER_MAX  1024              /* parser input length cap */
 #define MORI_FORMAT_BUFLEN   1024              /* formatter stack buffer */
-
-#ifdef _WIN32
-#define MORI_PREFIX_LITERAL  "Local\\mori_"
-#else
-#define MORI_PREFIX_LITERAL  "/mori_"
-#endif
-
-// Region layout constants -----------------------------------------------------
-
-/* Region magics (first 4 bytes): atomic vector, string vector, list tree. */
-#define MORI_MAGIC_VEC   0x4D4F5248u  /* "MORH" */
-#define MORI_MAGIC_STR   0x4D4F5253u  /* "MORS" */
-#define MORI_MAGIC_LIST  0x4D4F524Cu  /* "MORL" */
-
-/* Every region layout opens with a 64-byte header. Bytes [24-63] are
-   reserved (written zero): embedders keep cross-process state there. */
-#define MORI_HEADER_SIZE 64
 
 /* External-pointer tag strings (installed once at init). */
 #define MORI_TAG_SHM   "mori_shm"
@@ -38,17 +20,6 @@
 #define MORI_TAG_OWNED "mori_owned"
 
 // Types -----------------------------------------------------------------------
-
-typedef struct mori_shm_s {
-  void *addr;
-  size_t size;
-  char name[MORI_NAME_MAX];
-  uint8_t name_len;                /* strlen(name); fits since MORI_NAME_MAX < 256 */
-  unsigned int pid;                /* creator PID: fork guard for the host finalizer (read on POSIX only; Windows has no fork) */
-#ifdef _WIN32
-  void *handle;
-#endif
-} mori_shm;
 
 typedef struct mori_buf_s {
   unsigned char *buf;
@@ -85,30 +56,6 @@ typedef struct mori_list_view_s {
   int32_t index;             /* -1 = root, >= 0 = sub-list */
 } mori_list_view;
 
-/* Outcome of an SHM creation attempt: MORI_OK on success, otherwise a
-   portable failure category. The platform layer classifies errno /
-   GetLastError into one of these; mori_err_describe supplies the user-facing
-   summary and remediation hint. */
-enum {
-  MORI_OK = 0,
-  MORI_ENOSPC,   /* ENOSPC / ERROR_DISK_FULL */
-  MORI_ENOMEM,   /* ENOMEM / commit limit exceeded */
-  MORI_EEXIST,   /* region name already in use (orphan of a reused PID) */
-  MORI_EOTHER
-};
-
-// shm.c -----------------------------------------------------------------------
-
-int mori_shm_create(mori_shm *shm, size_t size);
-int mori_shm_open(mori_shm *shm, const char *name);
-void mori_shm_close(mori_shm *shm, int unlink);
-int mori_shm_create_heap(mori_shm **out, size_t size);
-mori_shm *mori_shm_open_heap(const char *name);
-void mori_shm_finalizer(SEXP ptr);
-void mori_host_finalizer(SEXP ptr);
-char **mori_shm_reap(int *n);
-void mori_err_describe(int category, const char **summary, const char **hint);
-
 // serialize.c -----------------------------------------------------------------
 
 size_t mori_serialize_count(SEXP object);
@@ -129,6 +76,13 @@ static inline size_t mori_sizeof_elt(int type) {
 // altrep.c --------------------------------------------------------------------
 
 void mori_altrep_init(DllInfo *dll);
+
+/* SHM extptr finalizers, defined alongside the wrap constructors that
+   register them: mori_shm_finalizer releases this side's mapping only;
+   mori_host_finalizer releases the SHM name/handle via
+   mori_shm_host_release. */
+void mori_shm_finalizer(SEXP ptr);
+void mori_host_finalizer(SEXP ptr);
 
 /* Wrap constructors: the returned view's data1 pins `keeper` through its
    protected slot; release/release_arg ride the owned metadata and fire

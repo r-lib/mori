@@ -711,6 +711,31 @@ static SEXP mori_list_Duplicate(SEXP x, Rboolean deep) {
 
 static SEXP mori_dispatch_by_magic(SEXP shm_ptr, const char *err_name);
 
+// SHM extptr finalizers ------------------------------------------------------
+
+/* Mapping finalizer (both sides): releases this side's mapping only.
+   The name (POSIX) / creator handle (Windows) is released independently
+   by mori_host_finalizer on the chained host_tag extptr — so a consumer
+   keeps reading after the host is GC'd. */
+void mori_shm_finalizer(SEXP ptr) {
+  mori_shm *shm = (mori_shm *) R_ExternalPtrAddr(ptr);
+  if (shm != NULL) {
+    mori_shm_close(shm, 0);
+    free(shm);
+    R_ClearExternalPtr(ptr);
+  }
+}
+
+/* Host-side finalizer: releases the SHM name/handle. */
+void mori_host_finalizer(SEXP ptr) {
+  mori_shm *shm = (mori_shm *) R_ExternalPtrAddr(ptr);
+  if (shm != NULL) {
+    mori_shm_host_release(shm);
+    free(shm);
+    R_ClearExternalPtr(ptr);
+  }
+}
+
 // SHM keeper wrappers: transfer heap mori_shm ownership to R -----------------
 
 /* Consumer-side: single shm_tag extptr with munmap-only finalizer. Takes
