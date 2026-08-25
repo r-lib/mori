@@ -34,6 +34,10 @@ typedef struct {
   int64_t length;
 } mori_elem;
 
+/* S4 flag riding a directory entry's sexptype: SEXPTYPEs are small
+   positive values, so bit 30 is free. Set at write, masked off at read. */
+#define MORI_ELEM_S4 0x40000000
+
 /* ALTSTRING offset table entry (16 bytes per string).
    str_length < 0 sentinel means NA_STRING.
    str_encoding is a cetype_t. */
@@ -507,6 +511,8 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
   int64_t data_offset = entry.data_offset, data_size = entry.data_size;
   int64_t length = entry.length;
   int32_t sexptype = entry.sexptype, attrs_size = entry.attrs_size;
+  int s4 = sexptype & MORI_ELEM_S4;
+  sexptype &= ~MORI_ELEM_S4;
 
   if (mori_oob(data_offset, data_size, region_size))
     Rf_error("mori: invalid element data");
@@ -547,6 +553,7 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
     size_t attrs_off = (size_t)(data_offset + data_size - attrs_size);
     mori_restore_attrs(result, base + attrs_off, (size_t) attrs_size);
   }
+  if (s4) result = Rf_asS4(result, TRUE, 0);
 
   UNPROTECT(1);
   return result;
@@ -566,7 +573,9 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
  *   Bytes 4-7:   int32_t  n_elements
  *   Bytes 8-15:  int64_t  attrs_offset
  *   Bytes 16-23: int64_t  attrs_size
- *   Bytes 24-63: reserved (zero) — embedder cross-process state
+ *   Bytes 24-31: reserved (zero) — embedder cross-process state
+ *   Bytes 32-35: uint32_t flags (bit 0: S4 object bit)
+ *   Bytes 36-63: reserved (zero)
  *   Byte 64+:    element directory (32 bytes per element)
  */
 
@@ -636,6 +645,7 @@ SEXP mori_list_wrap(unsigned char *base, int64_t region_size, int32_t index,
   if (attrs_size > 0)
     mori_restore_attrs(result, base + (size_t) attrs_offset,
                        (size_t) attrs_size);
+  result = mori_apply_s4(result, base);
 
   UNPROTECT(2);
   return result;
@@ -841,8 +851,7 @@ static size_t mori_nested_write(unsigned char *base, SEXP x);
    ok is NULL on the host path. When non-NULL (the embedder layout oracle),
    each node is vetted before sizing and the first rejection sets *ok = 0 and
    bails out with return 0: a non-mori ALTREP node would materialize through
-   DATAPTR_RO at write (a compact 1:1e8 becomes an 800 MB memcpy), and S4
-   bits do not survive the layouts. */
+   DATAPTR_RO at write (a compact 1:1e8 becomes an 800 MB memcpy). */
 static size_t mori_nested_size(SEXP x, int *ok) {
 
   R_xlen_t n = XLENGTH(x);
@@ -852,17 +861,13 @@ static size_t mori_nested_size(SEXP x, int *ok) {
     SEXP elt = VECTOR_ELT(x, i);
 
     if (ok != NULL) {
-      if (ALTREP(elt)) {
-        if (!mori_view_check(elt)) { *ok = 0; return 0; }
-      } else if (Rf_isS4(elt)) {
-        *ok = 0; return 0;
-      }
+      if (ALTREP(elt) && !mori_view_check(elt)) { *ok = 0; return 0; }
     }
 
     int type = TYPEOF(elt);
     size_t elt_size;
 
-    if (type == LISTSXP || type == VECSXP) {
+    if (type == VECSXP || (type == LISTSXP && !Rf_isS4(elt))) {
       SEXP coerced = (type == LISTSXP) ? Rf_coerceVector(elt, VECSXP) : elt;
       PROTECT(coerced);
       elt_size = mori_nested_size(coerced, ok);
@@ -906,6 +911,8 @@ static size_t mori_nested_write(unsigned char *base, SEXP x) {
   /* Reserved header bytes [24-63] are zeroed on every write: an embedder
      may recycle regions, so no stale field may survive a reuse. */
   memset(base + 24, 0, MORI_HEADER_SIZE - 24);
+  uint32_t flags = Rf_isS4(x) ? MORI_FLAG_S4 : 0u;
+  memcpy(base + MORI_FLAGS_OFF, &flags, 4);
 
   for (R_xlen_t i = 0; i < n; i++) {
     SEXP elt = VECTOR_ELT(x, i);
@@ -913,7 +920,7 @@ static size_t mori_nested_write(unsigned char *base, SEXP x) {
     mori_elem entry;
     entry.data_offset = (int64_t) cur;
 
-    if (type == LISTSXP || type == VECSXP) {
+    if (type == VECSXP || (type == LISTSXP && !Rf_isS4(elt))) {
       SEXP coerced = (type == LISTSXP) ? Rf_coerceVector(elt, VECSXP) : elt;
       PROTECT(coerced);
       size_t written = mori_nested_write(base + cur, coerced);
@@ -936,7 +943,7 @@ static size_t mori_nested_write(unsigned char *base, SEXP x) {
       if (elt_attrs != R_NilValue)
         attrs_size = mori_serialize_into(base + cur + raw_size, elt_attrs);
 
-      entry.sexptype = type;
+      entry.sexptype = type | (Rf_isS4(elt) ? MORI_ELEM_S4 : 0);
       entry.attrs_size = (int32_t) attrs_size;
       entry.length = (int64_t) XLENGTH(elt);
       entry.data_size = (int64_t) (raw_size + attrs_size);
@@ -1033,10 +1040,12 @@ static void morh_write(unsigned char *base, SEXP x) {
   int32_t sexptype = (int32_t) type;
   int64_t length = (int64_t) n;
   int64_t as64 = (int64_t) attrs_size;
+  uint32_t flags = Rf_isS4(x) ? MORI_FLAG_S4 : 0u;
   memcpy(base, &magic, 4);
   memcpy(base + 4, &sexptype, 4);
   memcpy(base + 8, &length, 8);
   memcpy(base + 16, &as64, 8);
+  memcpy(base + MORI_FLAGS_OFF, &flags, 4);
 
   UNPROTECT(1);
 }
@@ -1069,10 +1078,12 @@ static void mors_write(unsigned char *base, SEXP x) {
   int32_t as32 = (int32_t) attrs_size;
   int64_t n64 = (int64_t) n;
   int64_t sd = (int64_t) str_size;
+  uint32_t flags = Rf_isS4(x) ? MORI_FLAG_S4 : 0u;
   memcpy(base, &magic, 4);
   memcpy(base + 4, &as32, 4);
   memcpy(base + 8, &n64, 8);
   memcpy(base + 16, &sd, 8);
+  memcpy(base + MORI_FLAGS_OFF, &flags, 4);
 
   UNPROTECT(1);
 }
@@ -1087,13 +1098,11 @@ static void mors_write(unsigned char *base, SEXP x) {
    header. */
 static size_t mori_layout_size_impl(SEXP x, int *ok) {
   if (ok != NULL) {
-    if (ALTREP(x)) {
-      if (!mori_view_check(x)) { *ok = 0; return 0; }
-    } else if (Rf_isS4(x)) {
-      *ok = 0; return 0;
-    }
+    if (ALTREP(x) && !mori_view_check(x)) { *ok = 0; return 0; }
   }
   int type = TYPEOF(x);
+  /* An S4 pairlist root passes through: VECSXP coercion drops the bit. */
+  if (type == LISTSXP && Rf_isS4(x)) return 0;
   if (type == VECSXP || type == LISTSXP) {
     if (type == LISTSXP) {
       x = PROTECT(Rf_coerceVector(x, VECSXP));
@@ -1196,6 +1205,7 @@ static SEXP mori_open_vector(SEXP shm_ptr) {
     mori_restore_attrs(result, base + MORI_HEADER_SIZE + data_bytes,
                        (size_t) attrs_size);
   }
+  result = mori_apply_s4(result, base);
 
   UNPROTECT(1);
   return result;
@@ -1227,6 +1237,7 @@ static SEXP mori_open_string(SEXP shm_ptr) {
   if (attrs_size > 0)
     mori_restore_attrs(result, base + MORI_HEADER_SIZE + (size_t) str_data_size,
                        (size_t) attrs_size);
+  result = mori_apply_s4(result, base);
 
   UNPROTECT(1);
   return result;
@@ -1468,7 +1479,7 @@ SEXP mori_walk_path(unsigned char *base, int64_t region_size,
     mori_elem entry;
     memcpy(&entry, dir, sizeof(mori_elem));
     int64_t data_offset = entry.data_offset, data_size = entry.data_size;
-    int32_t sexptype = entry.sexptype;
+    int32_t sexptype = entry.sexptype & ~MORI_ELEM_S4;
 
     if (sexptype != VECSXP)
       Rf_error("mori: path step is not a nested list");

@@ -1,6 +1,7 @@
 # mori (development version)
 
 * Region layouts now open with a 64-byte header.
+* `share()` now supports S4 objects built on vectors or lists (previously the S4 object bit was silently dropped).
 * `share()` of attribute-heavy objects and nested lists is faster: the write pass no longer re-serializes each element just to measure its size.
 * Fixed type confusion on unserialize when a shared string's content resembled a shared memory identifier (e.g. a stored `shared_name()` value).
 * Fixed a forked child process (e.g. `parallel::mclapply`) unlinking the parent's live region when garbage-collecting an inherited shared object.
