@@ -311,3 +311,30 @@ test_that("root string access errors on an out-of-bounds offset table entry", {
   s <- map_shared(name)
   expect_error(s[1], "invalid string data")
 })
+
+test_that("map_shared() errors on an unsupported vector sexptype", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  # A MORH header claiming a sexptype with no element size passes the header
+  # checks (the size checks skip such types) but the wrap constructor
+  # rejects it.
+  name <- write_corrupt(morh_header(99L, length = 1))
+  expect_error(map_shared(name), "unsupported ALTREP type")
+})
+
+test_that("element access errors when string table alignment exceeds its data", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  # n = 1: the 16-byte offset table fits the entry's 16-byte data claim, but
+  # the table's 64-byte alignment padding does not.
+  name <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(data_offset = 96, data_size = 16, sexptype = STRSXP, length = 1),
+    raw(16L)
+  ))
+  expect_error(map_shared(name)[[1]], "invalid string data")
+})

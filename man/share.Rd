@@ -12,7 +12,7 @@ share(x)
 \value{
 For atomic vectors (including character vectors and those with
 attributes such as names, dim, class, or levels) and lists or data
-frames whose elements are such vectors, an ALTREP-backed object that
+frames, an ALTREP-backed object that
 reads directly from shared memory. For any other object (environments,
 closures, language objects, \code{NULL}), the input is returned unchanged
 with no shared memory region created.
@@ -28,6 +28,17 @@ elements are materialised lazily on access. When serialised (e.g. by
 \code{\link[=serialize]{serialize()}} or across a \code{mirai()} call), a shared object is represented
 compactly by its shared memory name (~30 bytes) rather than by its
 contents.
+
+An S4 object whose data part is an atomic vector, a character vector,
+or a list stays an S4 object when it is shared. The class and the slots
+are preserved, and S4 method dispatch works on the shared object. The
+data part is shared without a copy. The slots are serialised and
+restored on the consumer side as copies.
+
+A shared list can hold elements of any type. An element that is not an
+atomic vector, a character vector, or a list is serialised and restored
+as a copy on access. This applies to environments, closures, and
+language objects.
 
 The shared memory region is managed automatically. It stays alive as long
 as the returned object (or any element extracted from it) is referenced
