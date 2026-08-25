@@ -850,8 +850,11 @@ static size_t mori_nested_write(unsigned char *base, SEXP x);
    LISTSXP children are coerced locally during recursion.
    ok is NULL on the host path. When non-NULL (the embedder layout oracle),
    each node is vetted before sizing and the first rejection sets *ok = 0 and
-   bails out with return 0: a non-mori ALTREP node would materialize through
-   DATAPTR_RO at write (a compact 1:1e8 becomes an 800 MB memcpy). */
+   bails out with return 0: an ALTREP node that is neither a mori view
+   nor directly readable with no keeper chain (mori_altrep_readable)
+   would materialize through DATAPTR_RO at write or duplicate a wire
+   identity (a compact 1:1e8 becomes an 800 MB memcpy). R's S4 data-part
+   wrappers forward to their materialized data part and are accepted. */
 static size_t mori_nested_size(SEXP x, int *ok) {
 
   R_xlen_t n = XLENGTH(x);
@@ -861,7 +864,9 @@ static size_t mori_nested_size(SEXP x, int *ok) {
     SEXP elt = VECTOR_ELT(x, i);
 
     if (ok != NULL) {
-      if (ALTREP(elt) && !mori_view_check(elt)) { *ok = 0; return 0; }
+      if (ALTREP(elt) && !mori_view_check(elt) && !mori_altrep_readable(elt)) {
+        *ok = 0; return 0;
+      }
     }
 
     int type = TYPEOF(elt);
@@ -1098,7 +1103,9 @@ static void mors_write(unsigned char *base, SEXP x) {
    header. */
 static size_t mori_layout_size_impl(SEXP x, int *ok) {
   if (ok != NULL) {
-    if (ALTREP(x) && !mori_view_check(x)) { *ok = 0; return 0; }
+    if (ALTREP(x) && !mori_view_check(x) && !mori_altrep_readable(x)) {
+      *ok = 0; return 0;
+    }
   }
   int type = TYPEOF(x);
   /* An S4 pairlist root passes through: VECSXP coercion drops the bit. */

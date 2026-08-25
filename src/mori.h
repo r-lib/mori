@@ -80,6 +80,20 @@ static inline size_t mori_sizeof_elt(int type) {
   }
 }
 
+/* R's S4 data-part wrapper is an ALTREP that forwards every data method
+   to the wrapped vector (data1): directly readable, no compression, no
+   keeper chain. Recognize it by that shape — a non-ALTREP data1 of the
+   same type whose data pointer the wrapper shares. Anything else foreign
+   (a lazy ALTREP, a materialized compact sequence, an extptr-data1 view)
+   is rejected: the layout write would materialize it or forfeit its
+   compact wire form. */
+static inline int mori_altrep_readable(SEXP x) {
+  SEXP inner = R_altrep_data1(x);
+  if (ALTREP(inner) || TYPEOF(inner) != TYPEOF(x)) return 0;
+  const void *pi = DATAPTR_OR_NULL(inner);
+  return pi != NULL && DATAPTR_OR_NULL(x) == pi;
+}
+
 /* Apply a region header's S4 flag to a freshly wrapped view — after
    attributes land, so a read never consults a class definition
    (Rf_asS4 with complete = 0 sets the bit in place on a fresh object).
@@ -117,9 +131,11 @@ void mori_restore_attrs(SEXP result, unsigned char *buf, size_t size);
 
 /* Layout oracle and writer for embedder-managed regions: the size pass
    walks the tree and returns 0 for anything the layout writer must not
-   take (a non-mori ALTREP node would materialize through DATAPTR_RO).
-   The write emits exactly mori_layout_size bytes and zeroes header
-   reserved bytes. */
+   take: an ALTREP node is rejected unless it is a mori view (rides the
+   wire hooks) or mori_altrep_readable (R's S4 data-part wrappers
+   qualify; a compact 1:1e8 would materialize through DATAPTR_RO at
+   write). The write emits exactly mori_layout_size bytes and zeroes
+   header reserved bytes. */
 size_t mori_layout_size(SEXP x);
 void mori_layout_write(unsigned char *base, SEXP x);
 
