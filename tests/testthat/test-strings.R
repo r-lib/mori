@@ -111,3 +111,24 @@ test_that("order() materializes string ALTREP and re-reads the private copy", {
   expect_identical(y[[1]], "delta")
   expect_identical(y[], v)
 })
+
+test_that("print() exercises Dataptr_or_null on string ALTREP", {
+  # print() asks the ALTSTRING class for a full data pointer; mori declines
+  # (returns NULL) and R falls back to per-element access.
+  x <- share(c("hello", "world"))
+  y <- map_shared(shared_name(x))
+  expect_output(print(y), '"hello"')
+  expect_true(is_shared(y))
+})
+
+test_that("string Dataptr re-reads the materialized copy once COW'd", {
+  # order() (radix sort) takes the vector's DATAPTR, materializing to a
+  # private copy; a second order() and print() re-read that copy through the
+  # data2 branches of Dataptr and Dataptr_or_null.
+  v <- c("delta", "alpha", "gamma", "beta")
+  y <- map_shared(shared_name(share(v)))
+  expect_identical(order(y), order(v))
+  expect_identical(order(y), order(v))
+  expect_output(print(y), '"delta"')
+  expect_identical(y[], v)
+})

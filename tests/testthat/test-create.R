@@ -6,8 +6,9 @@
 # pre-create (Linux /dev/shm).
 
 test_that("share() errors when the name it would use is already taken", {
-  if (Sys.info()[["sysname"]] != "Linux")
+  if (Sys.info()[["sysname"]] != "Linux") {
     skip("requires file-backed /dev/shm (Linux only)")
+  }
 
   x <- share(1:10)
   nm <- shared_name(x) # "/mori_<pid>_<counter>"
@@ -40,11 +41,56 @@ test_that("share() errors when the name it would use is already taken", {
 # live create failure. The mapped category varies by platform (ENOMEM on macOS,
 # ENOSPC on Linux's size-capped tmpfs), so we assert only the size envelope.
 test_that("share() errors cleanly when the region is too large to back", {
-  if (.Machine$sizeof.pointer < 8)
+  if (.Machine$sizeof.pointer < 8) {
     skip("long vectors unsupported on 32-bit; PB-region path unreachable")
+  }
 
   expect_error(
     share(1:1e15),
     "cannot create region \\(requested .*PB\\)"
   )
+})
+
+# File-descriptor exhaustion: with the process at its fd limit the create fails
+# with EMFILE — neither space, memory, nor a name collision — exercising the
+# catch-all error category. R needs a few hundred fds to start and its
+# connection table caps below that, so the shell pre-opens fds that R inherits
+# and R's own connections take the rest.
+test_that("share() errors cleanly when file descriptors are exhausted", {
+  skip_on_os("windows")
+
+  rbin <- file.path(R.home("bin"), "R")
+  script <- paste(
+    "library(mori);",
+    "invisible(list(share, is_shared));", # force lazy-load before exhaustion
+    "cat('STARTED\\n');",
+    "cons <- list();",
+    "for (i in 1:200) {",
+    "  con <- try(file('/dev/null', 'r'), silent = TRUE);",
+    "  if (inherits(con, 'try-error')) break;",
+    "  cons[[length(cons) + 1L]] <- con;",
+    "};",
+    "msg <- tryCatch({ share(1:10); 'NO ERROR' }, error = conditionMessage);",
+    "cat('share:', msg, '\\n')"
+  )
+  of <- tempfile()
+  cmd <- paste0(
+    "ulimit -n 256 || exit 3; ",
+    "i=10; while [ $i -lt 160 ]; do eval \"exec ${i}< /dev/null\"; i=$((i+1)); done; ",
+    "R_LIBS=",
+    shQuote(paste(.libPaths(), collapse = .Platform$path.sep)),
+    " ",
+    shQuote(rbin),
+    " --vanilla -q -e ",
+    shQuote(script),
+    " > ",
+    shQuote(of),
+    " 2>&1"
+  )
+  system2("sh", c("-c", shQuote(cmd)))
+  out <- readLines(of)
+  if (!any(grepl("STARTED", out, fixed = TRUE))) {
+    skip("R subprocess could not start with a 256-fd limit")
+  }
+  expect_true(any(grepl("cannot create region.*unexpected error", out)))
 })

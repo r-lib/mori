@@ -246,3 +246,33 @@ test_that("sub-list beyond MORI_MAX_PATH falls back to materialization", {
   }
   expect_identical(final$leaf[], 1:3)
 })
+
+# Corrupt-stream guards: for the vector and list classes a STRSXP state is
+# always an SHM identifier, and for the string class a bare STRSXP state is —
+# one that no longer parses as an identifier means a corrupt stream, and
+# unserialize must error rather than fall through. The identifier is rewritten
+# in place (same length, so the stream stays structurally valid).
+
+test_that("unserialize errors on a tampered vector identifier", {
+  x <- share(1:10)
+  blob <- serialize(x, NULL)
+  pos <- grepRaw(shared_name(x), blob, fixed = TRUE, all = TRUE)
+  expect_length(pos, 1L)
+  blob[pos[[1]] + 6L] <- charToRaw("z") # first hex digit -> non-hex
+  expect_error(
+    unserialize(blob),
+    "invalid serialized state for a shared object"
+  )
+})
+
+test_that("unserialize errors on a tampered string identifier", {
+  x <- share(c("alpha", "beta"))
+  blob <- serialize(x, NULL)
+  pos <- grepRaw(shared_name(x), blob, fixed = TRUE, all = TRUE)
+  expect_length(pos, 1L)
+  blob[pos[[1]] + 6L] <- charToRaw("z")
+  expect_error(
+    unserialize(blob),
+    "invalid serialized state for a shared string vector"
+  )
+})
