@@ -3,6 +3,9 @@
 ## mori (development version)
 
 - Region layouts now open with a 64-byte header.
+- [`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) now
+  supports S4 objects built on vectors or lists (previously the S4
+  object bit was silently dropped).
 - [`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) of
   attribute-heavy objects and nested lists is faster: the write pass no
   longer re-serializes each element just to measure its size.

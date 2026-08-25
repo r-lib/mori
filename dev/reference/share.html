@@ -70,7 +70,7 @@ processes on the same machine can map without copying.</p>
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
     <p>For atomic vectors (including character vectors and those with
 attributes such as names, dim, class, or levels) and lists or data
-frames whose elements are such vectors, an ALTREP-backed object that
+frames, an ALTREP-backed object that
 reads directly from shared memory. For any other object (environments,
 closures, language objects, <code>NULL</code>), the input is returned unchanged
 with no shared memory region created.</p>
@@ -83,6 +83,15 @@ elements are materialised lazily on access. When serialised (e.g. by
 <code><a href="https://rdrr.io/r/base/serialize.html" class="external-link">serialize()</a></code> or across a <code><a href="https://mirai.r-lib.org/reference/mirai.html" class="external-link">mirai()</a></code> call), a shared object is represented
 compactly by its shared memory name (~30 bytes) rather than by its
 contents.</p>
+<p>An S4 object whose data part is an atomic vector, a character vector,
+or a list stays an S4 object when it is shared. The class and the slots
+are preserved, and S4 method dispatch works on the shared object. The
+data part is shared without a copy. The slots are serialised and
+restored on the consumer side as copies.</p>
+<p>A shared list can hold elements of any type. An element that is not an
+atomic vector, a character vector, or a list is serialised and restored
+as a copy on access. This applies to environments, closures, and
+language objects.</p>
 <p>The shared memory region is managed automatically. It stays alive as long
 as the returned object (or any element extracted from it) is referenced
 in R, and is freed automatically when no references remain or the session

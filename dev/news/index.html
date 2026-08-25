@@ -49,6 +49,8 @@
 <h2 class="pkg-version" data-toc-text="development version" id="mori-development-version">mori (development version)<a class="anchor" aria-label="anchor" href="#mori-development-version"></a></h2>
 <ul><li>Region layouts now open with a 64-byte header.</li>
 <li>
+<code><a href="../reference/share.html">share()</a></code> now supports S4 objects built on vectors or lists (previously the S4 object bit was silently dropped).</li>
+<li>
 <code><a href="../reference/share.html">share()</a></code> of attribute-heavy objects and nested lists is faster: the write pass no longer re-serializes each element just to measure its size.</li>
 <li>Fixed type confusion on unserialize when a shared string’s content resembled a shared memory identifier (e.g. a stored <code><a href="../reference/shared_name.html">shared_name()</a></code> value).</li>
 <li>Fixed a forked child process (e.g. <code><a href="https://rdrr.io/r/parallel/mclapply.html" class="external-link">parallel::mclapply</a></code>) unlinking the parent’s live region when garbage-collecting an inherited shared object.</li>

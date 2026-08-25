@@ -95,7 +95,7 @@
 <h2 id="embedder-c-api">Embedder C API<a class="anchor" aria-label="anchor" href="#embedder-c-api"></a></h2>
 <p>Declared in <code>mori.h</code>, C-level only (not <code>.Call</code>) — for packages embedding mori layouts under their own SHM management:</p>
 <ul><li>
-<strong>Layout oracle + writer</strong>: <code>mori_layout_size(x)</code> → region size, or 0 for what the writer must not take (non-mori ALTREP nodes — would materialize via <code>DATAPTR_RO</code>; S4 bits — don’t survive the layouts). Vetoes ride the size recursion (<code>mori_layout_size_impl</code> with <code>ok != NULL</code>); the host path passes <code>NULL</code> and vetoes nothing. <code>mori_layout_write(base, x)</code> emits exactly <code>mori_layout_size</code> bytes and zeroes reserved header bytes [24-63] on every write (embedders may recycle regions).</li>
+<strong>Layout oracle + writer</strong>: <code>mori_layout_size(x)</code> → region size, or 0 for what the writer must not take (non-mori ALTREP nodes — would materialize via <code>DATAPTR_RO</code>). The S4 object bit rides the layouts: header flags word at offset 32 (<code>MORI_FLAG_S4</code>) for MORH/MORS/MORL roots and nested lists, bit 30 of the directory entry’s <code>sexptype</code> (<code>MORI_ELEM_S4</code>) for vector/string leaves; applied with <code>Rf_asS4</code> after attributes land. Vetoes ride the size recursion (<code>mori_layout_size_impl</code> with <code>ok != NULL</code>); the host path passes <code>NULL</code> and vetoes nothing. <code>mori_layout_write(base, x)</code> emits exactly <code>mori_layout_size</code> bytes and zeroes reserved header bytes [24-63] on every write (embedders may recycle regions).</li>
 <li>
 <strong>Wrap constructors</strong>: <code>mori_vec_wrap</code> / <code>mori_str_wrap</code> / <code>mori_list_wrap</code> build views over embedder memory, pinning <code>keeper</code> via the data1 extptr’s protected slot; each takes a <code>release</code> once-hook (see Internal State). <code>mori_restore_attrs</code> reapplies trailing serialized attributes.</li>
 <li>
@@ -136,7 +136,7 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 </div>
 <div class="section level2">
 <h2 id="shm-region-layouts">SHM Region Layouts<a class="anchor" aria-label="anchor" href="#shm-region-layouts"></a></h2>
-<p>Magic in the first 4 bytes (<code>MORI_MAGIC_*</code>): MORH <code>0x4D4F5248</code> vector, MORL <code>0x4D4F524C</code> list, MORS <code>0x4D4F5253</code> string. Every layout opens with a 64-byte header; bytes [24-63] are reserved (zeroed on every write — embedders may recycle regions) for embedder cross-process state. Tables are the canonical spec; <code>mori_nested_write</code> / <code>morh_write</code> / <code>mors_write</code> (with <code>mori_serialize_into</code> for fallbacks and attrs) are the implementations. Attributes are serialized R objects (pairlist on R &lt; 4.6, named list otherwise); <code>mori_restore_attrs</code> reapplies them on the consumer.</p>
+<p>Magic in the first 4 bytes (<code>MORI_MAGIC_*</code>): MORH <code>0x4D4F5248</code> vector, MORL <code>0x4D4F524C</code> list, MORS <code>0x4D4F5253</code> string. Every layout opens with a 64-byte header; bytes [24-31] are reserved for embedder cross-process state, [32-35] hold a mori flags word (bit 0: S4 object bit), [36-63] are reserved (all zeroed on every write — embedders may recycle regions). Tables are the canonical spec; <code>mori_nested_write</code> / <code>morh_write</code> / <code>mors_write</code> (with <code>mori_serialize_into</code> for fallbacks and attrs) are the implementations. Attributes are serialized R objects (pairlist on R &lt; 4.6, named list otherwise); <code>mori_restore_attrs</code> reapplies them on the consumer.</p>
 <p><strong>MORH — atomic vector.</strong> Data at byte 64 (64-byte aligned for SIMD); trailing attrs after the data.</p>
 <table class="table"><thead><tr><th>Offset</th>
 <th>Size</th>
@@ -154,7 +154,13 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>8</td>
 <td>attrs_size (int64, 0 if none)</td>
 </tr><tr><td>24</td>
-<td>40</td>
+<td>8</td>
+<td>reserved (zero) — embedder cross-process state</td>
+</tr><tr><td>32</td>
+<td>4</td>
+<td>flags (bit 0: S4 object bit)</td>
+</tr><tr><td>36</td>
+<td>28</td>
 <td>reserved (zero)</td>
 </tr><tr><td>64+</td>
 <td></td>
@@ -179,7 +185,13 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>8</td>
 <td>attrs_size (int64)</td>
 </tr><tr><td>24</td>
-<td>40</td>
+<td>8</td>
+<td>reserved (zero) — embedder cross-process state</td>
+</tr><tr><td>32</td>
+<td>4</td>
+<td>flags (bit 0: S4 object bit)</td>
+</tr><tr><td>36</td>
+<td>28</td>
 <td>reserved (zero)</td>
 </tr><tr><td>64</td>
 <td>32×n</td>
@@ -187,7 +199,7 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 </tr><tr><td>varies</td>
 <td></td>
 <td>element data (64-byte aligned), then serialized attributes</td>
-</tr></tbody></table><p>Directory entry (32 bytes): <code>data_offset(8) + data_size(8) + sexptype(4) + attrs_size(4) + length(8)</code>. <code>sexptype</code>: <code>0</code> → serialized bytes (serialize.c); <code>STRSXP</code> → offset table + packed strings at <code>data_offset</code>; <code>VECSXP</code> → nested MORL region inlined at <code>data_offset</code> of size <code>data_size</code> (child header/directory/elements/attrs all inline; parent’s <code>attrs_size</code> always 0 for VECSXP children); other → raw zero-copy data. Non-VECSXP attrs sit at <code>data_offset + data_size - attrs_size</code>.</p>
+</tr></tbody></table><p>Directory entry (32 bytes): <code>data_offset(8) + data_size(8) + sexptype(4) + attrs_size(4) + length(8)</code>. <code>sexptype</code>: <code>0</code> → serialized bytes (serialize.c); <code>STRSXP</code> → offset table + packed strings at <code>data_offset</code>; <code>VECSXP</code> → nested MORL region inlined at <code>data_offset</code> of size <code>data_size</code> (child header/directory/elements/attrs all inline; parent’s <code>attrs_size</code> always 0 for VECSXP children); other → raw zero-copy data, with bit 30 of <code>sexptype</code> (<code>MORI_ELEM_S4</code>) flagging an S4 leaf (masked off at read). Non-VECSXP attrs sit at <code>data_offset + data_size - attrs_size</code>.</p>
 <p><strong>MORS — ALTSTRING.</strong> Header + offset table + packed string bytes + optional trailing attrs.</p>
 <table class="table"><colgroup><col width="38%"><col width="28%"><col width="33%"></colgroup><thead><tr><th>Offset</th>
 <th>Size</th>
@@ -205,7 +217,13 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>8</td>
 <td>str_data_size (int64: offset-table start → end of packed strings, incl. padding)</td>
 </tr><tr><td>24</td>
-<td>40</td>
+<td>8</td>
+<td>reserved (zero) — embedder cross-process state</td>
+</tr><tr><td>32</td>
+<td>4</td>
+<td>flags (bit 0: S4 object bit)</td>
+</tr><tr><td>36</td>
+<td>28</td>
 <td>reserved (zero)</td>
 </tr><tr><td>64</td>
 <td>16×n</td>

@@ -120,12 +120,15 @@ embedding mori layouts under their own SHM management:
 
 - **Layout oracle + writer**: `mori_layout_size(x)` → region size, or 0
   for what the writer must not take (non-mori ALTREP nodes — would
-  materialize via `DATAPTR_RO`; S4 bits — don’t survive the layouts).
-  Vetoes ride the size recursion (`mori_layout_size_impl` with
-  `ok != NULL`); the host path passes `NULL` and vetoes nothing.
-  `mori_layout_write(base, x)` emits exactly `mori_layout_size` bytes
-  and zeroes reserved header bytes \[24-63\] on every write (embedders
-  may recycle regions).
+  materialize via `DATAPTR_RO`). The S4 object bit rides the layouts:
+  header flags word at offset 32 (`MORI_FLAG_S4`) for MORH/MORS/MORL
+  roots and nested lists, bit 30 of the directory entry’s `sexptype`
+  (`MORI_ELEM_S4`) for vector/string leaves; applied with `Rf_asS4`
+  after attributes land. Vetoes ride the size recursion
+  (`mori_layout_size_impl` with `ok != NULL`); the host path passes
+  `NULL` and vetoes nothing. `mori_layout_write(base, x)` emits exactly
+  `mori_layout_size` bytes and zeroes reserved header bytes \[24-63\] on
+  every write (embedders may recycle regions).
 - **Wrap constructors**: `mori_vec_wrap` / `mori_str_wrap` /
   `mori_list_wrap` build views over embedder memory, pinning `keeper`
   via the data1 extptr’s protected slot; each takes a `release`
@@ -224,26 +227,29 @@ probe-vs-corruption distinction.
 
 Magic in the first 4 bytes (`MORI_MAGIC_*`): MORH `0x4D4F5248` vector,
 MORL `0x4D4F524C` list, MORS `0x4D4F5253` string. Every layout opens
-with a 64-byte header; bytes \[24-63\] are reserved (zeroed on every
-write — embedders may recycle regions) for embedder cross-process state.
-Tables are the canonical spec; `mori_nested_write` / `morh_write` /
-`mors_write` (with `mori_serialize_into` for fallbacks and attrs) are
-the implementations. Attributes are serialized R objects (pairlist on R
-\< 4.6, named list otherwise); `mori_restore_attrs` reapplies them on
-the consumer.
+with a 64-byte header; bytes \[24-31\] are reserved for embedder
+cross-process state, \[32-35\] hold a mori flags word (bit 0: S4 object
+bit), \[36-63\] are reserved (all zeroed on every write — embedders may
+recycle regions). Tables are the canonical spec; `mori_nested_write` /
+`morh_write` / `mors_write` (with `mori_serialize_into` for fallbacks
+and attrs) are the implementations. Attributes are serialized R objects
+(pairlist on R \< 4.6, named list otherwise); `mori_restore_attrs`
+reapplies them on the consumer.
 
 **MORH — atomic vector.** Data at byte 64 (64-byte aligned for SIMD);
 trailing attrs after the data.
 
-| Offset               | Size | Field                                        |
-|----------------------|------|----------------------------------------------|
-| 0                    | 4    | magic                                        |
-| 4                    | 4    | sexptype                                     |
-| 8                    | 8    | length (int64)                               |
-| 16                   | 8    | attrs_size (int64, 0 if none)                |
-| 24                   | 40   | reserved (zero)                              |
-| 64+                  |      | raw vector data                              |
-| 64 + length×elt_size |      | serialized attributes (if `attrs_size` \> 0) |
+| Offset               | Size | Field                                          |
+|----------------------|------|------------------------------------------------|
+| 0                    | 4    | magic                                          |
+| 4                    | 4    | sexptype                                       |
+| 8                    | 8    | length (int64)                                 |
+| 16                   | 8    | attrs_size (int64, 0 if none)                  |
+| 24                   | 8    | reserved (zero) — embedder cross-process state |
+| 32                   | 4    | flags (bit 0: S4 object bit)                   |
+| 36                   | 28   | reserved (zero)                                |
+| 64+                  |      | raw vector data                                |
+| 64 + length×elt_size |      | serialized attributes (if `attrs_size` \> 0)   |
 
 **MORL — ALTLIST.** Header + element directory + per-element data
 regions.
@@ -254,7 +260,9 @@ regions.
 | 4      | 4    | n_elements (int32)                                         |
 | 8      | 8    | attrs_offset (int64)                                       |
 | 16     | 8    | attrs_size (int64)                                         |
-| 24     | 40   | reserved (zero)                                            |
+| 24     | 8    | reserved (zero) — embedder cross-process state             |
+| 32     | 4    | flags (bit 0: S4 object bit)                               |
+| 36     | 28   | reserved (zero)                                            |
 | 64     | 32×n | element directory                                          |
 | varies |      | element data (64-byte aligned), then serialized attributes |
 
@@ -264,8 +272,9 @@ Directory entry (32 bytes):
 table + packed strings at `data_offset`; `VECSXP` → nested MORL region
 inlined at `data_offset` of size `data_size` (child
 header/directory/elements/attrs all inline; parent’s `attrs_size` always
-0 for VECSXP children); other → raw zero-copy data. Non-VECSXP attrs sit
-at `data_offset + data_size - attrs_size`.
+0 for VECSXP children); other → raw zero-copy data, with bit 30 of
+`sexptype` (`MORI_ELEM_S4`) flagging an S4 leaf (masked off at read).
+Non-VECSXP attrs sit at `data_offset + data_size - attrs_size`.
 
 **MORS — ALTSTRING.** Header + offset table + packed string bytes +
 optional trailing attrs.
@@ -276,7 +285,9 @@ optional trailing attrs.
 | 4 | 4 | attrs_size (int32, 0 if none) |
 | 8 | 8 | n_strings (int64) |
 | 16 | 8 | str_data_size (int64: offset-table start → end of packed strings, incl. padding) |
-| 24 | 40 | reserved (zero) |
+| 24 | 8 | reserved (zero) — embedder cross-process state |
+| 32 | 4 | flags (bit 0: S4 object bit) |
+| 36 | 28 | reserved (zero) |
 | 64 | 16×n | offset table |
 | 64 + align64(16×n) |  | packed string bytes |
 | 64 + str_data_size |  | serialized attributes (if `attrs_size` \> 0) |
