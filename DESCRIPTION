@@ -14,7 +14,7 @@ Description: Share R objects across processes on the same machine via a
     lazy, zero-copy access. Shared objects serialize compactly as their
     shared memory name rather than their full contents.
 License: MIT + file LICENSE
-URL: https://r-lib.github.io/mori/, https://github.com/r-lib/mori
+URL: https://mori.r-lib.org, https://github.com/r-lib/mori
 BugReports: https://github.com/r-lib/mori/issues
 Depends:
     R (>= 4.3)
