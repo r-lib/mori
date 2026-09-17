@@ -21,6 +21,7 @@
 <meta property="og:image" content="https://raw.githubusercontent.com/r-lib/mori/main/dev/images/mori.png">
 <meta property="og:image:alt" content="mori">
 <meta name="robots" content="noindex">
+<script src="https://cdn.jsdelivr.net/gh/posit-dev/supported-by-posit/js/badge.min.js" data-hide-below="1200" data-max-height="43" data-light-bg="#666f76" data-light-fg="#f9f9f9"></script><script defer data-domain="mori.r-lib.org,all.tidyverse.org" src="https://plausible.io/js/plausible.js"></script>
 </head>
 <body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
@@ -91,7 +92,7 @@
 <p>Parallel computing multiplies memory. When 8 workers each need the same 200 MB dataset, that is 1.6 GB of serialization, transfer, and deserialization. RAM holds 8 separate copies.</p>
 <p><code><a href="reference/share.html">share()</a></code> writes the data into shared memory once. Each worker then maps the same physical pages. Per-worker copies become per-worker references.</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://r-lib.github.io/mori/">mori</a></span><span class="op">)</span></span>
+<code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://mori.r-lib.org">mori</a></span><span class="op">)</span></span>
 <span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://mirai.r-lib.org" class="external-link">mirai</a></span><span class="op">)</span></span>
 <span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://lobstr.r-lib.org/" class="external-link">lobstr</a></span><span class="op">)</span></span>
 <span></span>
@@ -116,12 +117,12 @@
 <span><span class="co"># Without mori — each daemon deserializes a full copy</span></span>
 <span><span class="fu"><a href="https://mirai.r-lib.org/reference/mirai_map.html" class="external-link">mirai_map</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">8</span>, <span class="va">boot_mean</span>, .args <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/list.html" class="external-link">list</a></span><span class="op">(</span>data <span class="op">=</span> <span class="va">df</span><span class="op">)</span><span class="op">)</span><span class="op">[</span><span class="op">]</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://rdrr.io/r/base/system.time.html" class="external-link">system.time</a></span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="co">#&gt;    user  system elapsed </span></span>
-<span><span class="co">#&gt;   0.640  13.173   8.434</span></span>
+<span><span class="co">#&gt;   0.622  12.886   8.502</span></span>
 <span></span>
 <span><span class="co"># With mori — each daemon maps the same shared memory</span></span>
 <span><span class="fu"><a href="https://mirai.r-lib.org/reference/mirai_map.html" class="external-link">mirai_map</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">8</span>, <span class="va">boot_mean</span>, .args <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/list.html" class="external-link">list</a></span><span class="op">(</span>data <span class="op">=</span> <span class="va">shared_df</span><span class="op">)</span><span class="op">)</span><span class="op">[</span><span class="op">]</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://rdrr.io/r/base/system.time.html" class="external-link">system.time</a></span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="co">#&gt;    user  system elapsed </span></span>
-<span><span class="co">#&gt;   0.002   0.004   4.827</span></span>
+<span><span class="co">#&gt;   0.002   0.003   4.970</span></span>
 <span></span>
 <span><span class="fu"><a href="https://mirai.r-lib.org/reference/daemons.html" class="external-link">daemons</a></span><span class="op">(</span><span class="fl">0</span><span class="op">)</span></span></code></pre></div>
 </div>
@@ -137,7 +138,7 @@
 <code class="sourceCode R"><span><span class="va">x</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/share.html">share</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/stats/Normal.html" class="external-link">rnorm</a></span><span class="op">(</span><span class="fl">1e6</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="reference/shared_name.html">shared_name</a></span><span class="op">(</span><span class="va">x</span><span class="op">)</span></span>
-<span><span class="co">#&gt; [1] "/mori_6cca_11b91a1d"</span></span></code></pre></div>
+<span><span class="co">#&gt; [1] "/mori_bef7_c2c388b5"</span></span></code></pre></div>
 <div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="co"># Another process can map the region by name</span></span>
 <span><span class="va">y</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/map_shared.html">map_shared</a></span><span class="op">(</span><span class="fu"><a href="reference/shared_name.html">shared_name</a></span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
@@ -182,9 +183,9 @@
 <div class="sourceCode" id="cb9"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">df</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/share.html">share</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/as.data.frame.html" class="external-link">as.data.frame</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/matrix.html" class="external-link">matrix</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/stats/Normal.html" class="external-link">rnorm</a></span><span class="op">(</span><span class="fl">1e7</span><span class="op">)</span>, ncol <span class="op">=</span> <span class="fl">100</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="fu"><a href="reference/shared_name.html">shared_name</a></span><span class="op">(</span><span class="va">df</span><span class="op">)</span>        <span class="co"># one region for all 100 columns</span></span>
-<span><span class="co">#&gt; [1] "/mori_6cca_11b91a1f"</span></span>
+<span><span class="co">#&gt; [1] "/mori_bef7_c2c388b7"</span></span>
 <span><span class="fu"><a href="reference/shared_name.html">shared_name</a></span><span class="op">(</span><span class="va">df</span><span class="op">[[</span><span class="fl">50</span><span class="op">]</span><span class="op">]</span><span class="op">)</span>  <span class="co"># sub-path into the same region</span></span>
-<span><span class="co">#&gt; [1] "/mori_6cca_11b91a1f[50]"</span></span></code></pre></div>
+<span><span class="co">#&gt; [1] "/mori_bef7_c2c388b7[50]"</span></span></code></pre></div>
 </div>
 <div class="section level3">
 <h3 id="lifetime">Lifetime<a class="anchor" aria-label="anchor" href="#lifetime"></a>
@@ -204,7 +205,7 @@
 <strong>Modifying values</strong> of a shared vector (for example, <code>X[1] &lt;- 0</code>) materializes only that vector into a private copy. Other vectors in the same shared region stay zero-copy.</li>
 </ul>
 <p>–</p>
-<p>The mori project is released with a <a href="https://r-lib.github.io/mori/CODE_OF_CONDUCT.html">Contributor Code of Conduct</a>. When you contribute to this project, you agree to obey its terms.</p>
+<p>The mori project is released with a <a href="https://mori.r-lib.org/CODE_OF_CONDUCT.html">Contributor Code of Conduct</a>. When you contribute to this project, you agree to obey its terms.</p>
 </div>
 </div>
 </div>

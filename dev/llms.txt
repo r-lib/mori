@@ -5,8 +5,8 @@ DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/r-lib/mori)
 
 Shared Memory for R Objects
 
-→ [`share()`](https://r-lib.github.io/mori/dev/reference/share.md)
-writes an R object into shared memory and returns a shared version
+→ [`share()`](https://mori.r-lib.org/dev/reference/share.md) writes an R
+object into shared memory and returns a shared version
 
 → Compact ALTREP serialization — shared objects move through
 [`serialize()`](https://rdrr.io/r/base/serialize.html) and
@@ -38,9 +38,9 @@ Parallel computing multiplies memory. When 8 workers each need the same
 200 MB dataset, that is 1.6 GB of serialization, transfer, and
 deserialization. RAM holds 8 separate copies.
 
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) writes
-the data into shared memory once. Each worker then maps the same
-physical pages. Per-worker copies become per-worker references.
+[`share()`](https://mori.r-lib.org/dev/reference/share.md) writes the
+data into shared memory once. Each worker then maps the same physical
+pages. Per-worker copies become per-worker references.
 
 ``` r
 
@@ -79,12 +79,12 @@ boot_mean <- \(i, data) colMeans(data[sample(nrow(data), replace = TRUE), ])
 # Without mori — each daemon deserializes a full copy
 mirai_map(1:8, boot_mean, .args = list(data = df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.640  13.173   8.434
+#>   0.622  12.886   8.502
 
 # With mori — each daemon maps the same shared memory
 mirai_map(1:8, boot_mean, .args = list(data = shared_df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.002   0.004   4.827
+#>   0.002   0.003   4.970
 
 daemons(0)
 ```
@@ -95,9 +95,9 @@ Workers must run on the same machine, because mori shares physical RAM.
 
 ### Sharing by name
 
-[`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)
+[`shared_name()`](https://mori.r-lib.org/dev/reference/shared_name.md)
 returns the shared memory name of a shared object.
-[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md)
+[`map_shared()`](https://mori.r-lib.org/dev/reference/map_shared.md)
 opens a region by this name. This passes a reference between processes
 without serialization:
 
@@ -106,7 +106,7 @@ without serialization:
 x <- share(rnorm(1e6))
 
 shared_name(x)
-#> [1] "/mori_6cca_11b91a1d"
+#> [1] "/mori_bef7_c2c388b5"
 ```
 
 ``` r
@@ -155,15 +155,15 @@ daemons(0)
 
 ### What gets shared
 
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) writes
-all atomic vector types, lists, and data frames directly into shared
-memory. Attributes are preserved end-to-end. Pairlists become lists. The
+[`share()`](https://mori.r-lib.org/dev/reference/share.md) writes all
+atomic vector types, lists, and data frames directly into shared memory.
+Attributes are preserved end-to-end. Pairlists become lists. The
 returned ALTREP wrappers point into the shared memory region. There is
 no deserialization and no per-process memory allocation.
 
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) returns
-all other R objects (environments, closures, language objects)
-unchanged. It creates no shared memory region for them.
+[`share()`](https://mori.r-lib.org/dev/reference/share.md) returns all
+other R objects (environments, closures, language objects) unchanged. It
+creates no shared memory region for them.
 
 ### Lazy access
 
@@ -175,9 +175,9 @@ strings load on demand, one element at a time.
 
 df <- share(as.data.frame(matrix(rnorm(1e7), ncol = 100)))
 shared_name(df)        # one region for all 100 columns
-#> [1] "/mori_6cca_11b91a1f"
+#> [1] "/mori_bef7_c2c388b7"
 shared_name(df[[50]])  # sub-path into the same region
-#> [1] "/mori_6cca_11b91a1f[50]"
+#> [1] "/mori_bef7_c2c388b7[50]"
 ```
 
 ### Lifetime
@@ -185,19 +185,18 @@ shared_name(df[[50]])  # sub-path into the same region
 R’s garbage collector manages the shared memory. A region stays alive
 while R holds a reference to any object backed by it. The reference can
 be the original from
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md), or a
-column or sub-list extracted from it. This reference can be in the
-original or another process. When no references remain, or when the
-session exits cleanly, R frees the shared memory automatically.
+[`share()`](https://mori.r-lib.org/dev/reference/share.md), or a column
+or sub-list extracted from it. This reference can be in the original or
+another process. When no references remain, or when the session exits
+cleanly, R frees the shared memory automatically.
 
 **Important:** Make sure that R does not garbage-collect the return
-value of
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) before
-a consumer maps its shared memory.
+value of [`share()`](https://mori.r-lib.org/dev/reference/share.md)
+before a consumer maps its shared memory.
 
 If a process dies before cleanup runs (a crash, `SIGKILL`, or the OOM
 killer), its region can be left behind.
-[`prune_shared()`](https://r-lib.github.io/mori/dev/reference/prune_shared.md)
+[`prune_shared()`](https://mori.r-lib.org/dev/reference/prune_shared.md)
 reclaims these orphans. It removes only regions whose creating process
 is no longer running.
 
@@ -217,24 +216,24 @@ other processes continue to read the original shared data:
 –
 
 The mori project is released with a [Contributor Code of
-Conduct](https://r-lib.github.io/mori/CODE_OF_CONDUCT.html). When you
+Conduct](https://mori.r-lib.org/CODE_OF_CONDUCT.html). When you
 contribute to this project, you agree to obey its terms.
 
 # Package index
 
 ## All functions
 
-- [`is_shared()`](https://r-lib.github.io/mori/dev/reference/is_shared.md)
-  : Test if an Object is Shared
-- [`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md)
-  : Open Shared Memory by Name
-- [`mori`](https://r-lib.github.io/mori/dev/reference/mori-package.md)
-  [`mori-package`](https://r-lib.github.io/mori/dev/reference/mori-package.md)
+- [`is_shared()`](https://mori.r-lib.org/dev/reference/is_shared.md) :
+  Test if an Object is Shared
+- [`map_shared()`](https://mori.r-lib.org/dev/reference/map_shared.md) :
+  Open Shared Memory by Name
+- [`mori`](https://mori.r-lib.org/dev/reference/mori-package.md)
+  [`mori-package`](https://mori.r-lib.org/dev/reference/mori-package.md)
   : mori: Shared Memory for R Objects
-- [`prune_shared()`](https://r-lib.github.io/mori/dev/reference/prune_shared.md)
+- [`prune_shared()`](https://mori.r-lib.org/dev/reference/prune_shared.md)
   : Prune Orphaned Shared Memory Regions
-- [`share()`](https://r-lib.github.io/mori/dev/reference/share.md) :
-  Create a Shared Object
-- [`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)
+- [`share()`](https://mori.r-lib.org/dev/reference/share.md) : Create a
+  Shared Object
+- [`shared_name()`](https://mori.r-lib.org/dev/reference/shared_name.md)
   : Extract Shared Memory Name
 

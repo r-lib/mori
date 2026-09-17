@@ -1,9 +1,9 @@
 # Test if an Object is Shared
 
 Returns `TRUE` if `x` is an ALTREP object backed by shared memory
-(created by
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) or
-[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md)),
+(created by [`share()`](https://mori.r-lib.org/dev/reference/share.md)
+or
+[`map_shared()`](https://mori.r-lib.org/dev/reference/map_shared.md)),
 `FALSE` otherwise.
 
 ## Usage

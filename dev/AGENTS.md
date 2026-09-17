@@ -5,14 +5,13 @@ Shared Memory for R Objects: POSIX shared memory (Linux, macOS) / Win32
 file mappings (Windows) + R’s ALTREP framework let processes on one
 machine read the same physical pages. No external dependencies; requires
 R \>= 4.3.0 (ALTLIST). R API (all thin `.Call` wrappers; logic is
-C-level):
-[`share()`](https://r-lib.github.io/mori/dev/reference/share.md),
-[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md),
-[`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md),
-[`is_shared()`](https://r-lib.github.io/mori/dev/reference/is_shared.md),
-[`prune_shared()`](https://r-lib.github.io/mori/dev/reference/prune_shared.md).
+C-level): [`share()`](https://mori.r-lib.org/dev/reference/share.md),
+[`map_shared()`](https://mori.r-lib.org/dev/reference/map_shared.md),
+[`shared_name()`](https://mori.r-lib.org/dev/reference/shared_name.md),
+[`is_shared()`](https://mori.r-lib.org/dev/reference/is_shared.md),
+[`prune_shared()`](https://mori.r-lib.org/dev/reference/prune_shared.md).
 ALTREP serialization hooks emit the
-[`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)
+[`shared_name()`](https://mori.r-lib.org/dev/reference/shared_name.md)
 identifier as the wire form — transparent under
 [`serialize()`](https://rdrr.io/r/base/serialize.html) and `mirai`.
 
@@ -54,9 +53,9 @@ R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
 - **Nested lists (zero-copy)**: VECSXP/LISTSXP elements are written
   inline as a complete child MORL region at their `data_offset`, each
   level wrapped in its own ALTLIST. Sub-lists are
-  [`is_shared()`](https://r-lib.github.io/mori/dev/reference/is_shared.md)-TRUE
+  [`is_shared()`](https://mori.r-lib.org/dev/reference/is_shared.md)-TRUE
   with path-bearing
-  [`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)s;
+  [`shared_name()`](https://mori.r-lib.org/dev/reference/shared_name.md)s;
   `map_shared(shared_name(sub))` opens them directly. The OS region name
   is the prefix before `[` (`sub("\\[.*$", "", shared_name(x))`).
 - **Pass-through**: everything else (environments, closures, language,
@@ -66,7 +65,7 @@ R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
 
 **Write-once on host, read-many on consumers, COW for any mutation.**
 
-- Each [`share()`](https://r-lib.github.io/mori/dev/reference/share.md)
+- Each [`share()`](https://mori.r-lib.org/dev/reference/share.md)
   allocates a fresh region; existing regions are never mutated. No
   locking anywhere — any change admitting in-place mutation breaks the
   model.
@@ -75,7 +74,7 @@ R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
   `O_EXCL` / `ERROR_ALREADY_EXISTS`; a collision (orphan of a crashed
   same-PID process) is an error (`MORI_EEXIST`), never worked around by
   reuse.
-- [`prune_shared()`](https://r-lib.github.io/mori/dev/reference/prune_shared.md)
+- [`prune_shared()`](https://mori.r-lib.org/dev/reference/prune_shared.md)
   clears such orphans; it must run while the PID is free — a live
   process cannot reap its own names.
 - The host writes the full region before its name is observable —
@@ -92,7 +91,7 @@ R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
 0.  Already mori-backed (`mori_view_check`) → return `x` unchanged.
     Idempotence required: re-sharing a sub-list view must not allocate a
     fresh root region (would break
-    [`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)).
+    [`shared_name()`](https://mori.r-lib.org/dev/reference/shared_name.md)).
 1.  Otherwise sizes via `mori_layout_size_impl` (`ok = NULL` here — no
     vetoes; non-mori ALTREPs materialize through `DATAPTR_RO` at write)
     and writes via `mori_layout_write`; 0 size → `x` returned as-is.
@@ -325,8 +324,8 @@ materialization or the finalizer, whichever first; internal callers pass
 NULL. ALTLIST views fire at the finalizer only: extracted elements keep
 referencing the region.
 
-[`is_shared()`](https://r-lib.github.io/mori/dev/reference/is_shared.md)
-= `mori_view_check` (ALTREP with `mori_owned_tag` data1).
+[`is_shared()`](https://mori.r-lib.org/dev/reference/is_shared.md) =
+`mori_view_check` (ALTREP with `mori_owned_tag` data1).
 `mori_shm_name()` = `mori_format_chain` (bare prefix for roots, path
 form for sub-objects).
 
