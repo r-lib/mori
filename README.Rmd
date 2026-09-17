@@ -14,7 +14,7 @@ knitr::opts_chunk$set(
 )
 ```
 
-# mori <a href="https://r-lib.github.io/mori/"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
+# mori <a href="https://mori.r-lib.org"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
 
 <!-- badges: start -->
 [![CRAN status](https://www.r-pkg.org/badges/version/mori)](https://CRAN.R-project.org/package=mori)
@@ -200,5 +200,5 @@ Copy-on-write makes sure that other processes continue to read the original shar
 
 --
 
-The mori project is released with a [Contributor Code of Conduct](https://r-lib.github.io/mori/CODE_OF_CONDUCT.html).
+The mori project is released with a [Contributor Code of Conduct](https://mori.r-lib.org/CODE_OF_CONDUCT.html).
 When you contribute to this project, you agree to obey its terms.

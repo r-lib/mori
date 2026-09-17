@@ -1,7 +1,7 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# mori <a href="https://r-lib.github.io/mori/"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
+# mori <a href="https://mori.r-lib.org"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
 
 <!-- badges: start -->
 
@@ -82,12 +82,12 @@ boot_mean <- \(i, data) colMeans(data[sample(nrow(data), replace = TRUE), ])
 # Without mori — each daemon deserializes a full copy
 mirai_map(1:8, boot_mean, .args = list(data = df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.640  13.173   8.434
+#>   0.622  12.886   8.502
 
 # With mori — each daemon maps the same shared memory
 mirai_map(1:8, boot_mean, .args = list(data = shared_df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.002   0.004   4.827
+#>   0.002   0.003   4.970
 
 daemons(0)
 ```
@@ -106,7 +106,7 @@ between processes without serialization:
 x <- share(rnorm(1e6))
 
 shared_name(x)
-#> [1] "/mori_6cca_11b91a1d"
+#> [1] "/mori_bef7_c2c388b5"
 ```
 
 ``` r
@@ -169,9 +169,9 @@ strings load on demand, one element at a time.
 ``` r
 df <- share(as.data.frame(matrix(rnorm(1e7), ncol = 100)))
 shared_name(df)        # one region for all 100 columns
-#> [1] "/mori_6cca_11b91a1f"
+#> [1] "/mori_bef7_c2c388b7"
 shared_name(df[[50]])  # sub-path into the same region
-#> [1] "/mori_6cca_11b91a1f[50]"
+#> [1] "/mori_bef7_c2c388b7[50]"
 ```
 
 ### Lifetime
@@ -207,5 +207,5 @@ other processes continue to read the original shared data:
 –
 
 The mori project is released with a [Contributor Code of
-Conduct](https://r-lib.github.io/mori/CODE_OF_CONDUCT.html). When you
+Conduct](https://mori.r-lib.org/CODE_OF_CONDUCT.html). When you
 contribute to this project, you agree to obey its terms.
