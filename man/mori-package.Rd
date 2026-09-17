@@ -15,9 +15,9 @@ when the R object is garbage collected.
 \seealso{
 Useful links:
 \itemize{
-  \item \url{https://shikokuchuo.net/mori/}
-  \item \url{https://github.com/shikokuchuo/mori}
-  \item Report bugs at \url{https://github.com/shikokuchuo/mori/issues}
+  \item \url{https://r-lib.github.io/mori/}
+  \item \url{https://github.com/r-lib/mori}
+  \item Report bugs at \url{https://github.com/r-lib/mori/issues}
 }
 
 }

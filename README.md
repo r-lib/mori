@@ -1,19 +1,19 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# mori <a href="https://shikokuchuo.net/mori/"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
+# mori <a href="https://r-lib.github.io/mori/"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
 
 <!-- badges: start -->
 
 [![CRAN
 status](https://www.r-pkg.org/badges/version/mori)](https://CRAN.R-project.org/package=mori)
-[![R-CMD-check](https://github.com/shikokuchuo/mori/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/shikokuchuo/mori/actions/workflows/R-CMD-check.yaml)
+[![R-CMD-check](https://github.com/r-lib/mori/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/r-lib/mori/actions/workflows/R-CMD-check.yaml)
 [![Codecov test
-coverage](https://codecov.io/gh/shikokuchuo/mori/graph/badge.svg)](https://app.codecov.io/gh/shikokuchuo/mori)
+coverage](https://codecov.io/gh/r-lib/mori/graph/badge.svg)](https://app.codecov.io/gh/r-lib/mori)
 <!-- badges: end -->
 
 [![Ask
-DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shikokuchuo/mori)
+DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/r-lib/mori)
 
 Shared Memory for R Objects
 
@@ -82,12 +82,12 @@ boot_mean <- \(i, data) colMeans(data[sample(nrow(data), replace = TRUE), ])
 # Without mori — each daemon deserializes a full copy
 mirai_map(1:8, boot_mean, .args = list(data = df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.672  13.222   8.483
+#>   0.640  13.173   8.434
 
 # With mori — each daemon maps the same shared memory
 mirai_map(1:8, boot_mean, .args = list(data = shared_df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.002   0.004   4.736
+#>   0.002   0.004   4.827
 
 daemons(0)
 ```
@@ -106,7 +106,7 @@ between processes without serialization:
 x <- share(rnorm(1e6))
 
 shared_name(x)
-#> [1] "/mori_1574_9c6fbbc4"
+#> [1] "/mori_6cca_11b91a1d"
 ```
 
 ``` r
@@ -169,9 +169,9 @@ strings load on demand, one element at a time.
 ``` r
 df <- share(as.data.frame(matrix(rnorm(1e7), ncol = 100)))
 shared_name(df)        # one region for all 100 columns
-#> [1] "/mori_1574_9c6fbbc6"
+#> [1] "/mori_6cca_11b91a1f"
 shared_name(df[[50]])  # sub-path into the same region
-#> [1] "/mori_1574_9c6fbbc6[50]"
+#> [1] "/mori_6cca_11b91a1f[50]"
 ```
 
 ### Lifetime
@@ -207,5 +207,5 @@ other processes continue to read the original shared data:
 –
 
 The mori project is released with a [Contributor Code of
-Conduct](https://shikokuchuo.net/mori/CODE_OF_CONDUCT.html). When you
+Conduct](https://r-lib.github.io/mori/CODE_OF_CONDUCT.html). When you
 contribute to this project, you agree to obey its terms.

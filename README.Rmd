@@ -14,15 +14,15 @@ knitr::opts_chunk$set(
 )
 ```
 
-# mori <a href="https://shikokuchuo.net/mori/"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
+# mori <a href="https://r-lib.github.io/mori/"><img src="man/figures/logo.svg" align="right" height="139" alt="mori website" /></a>
 
 <!-- badges: start -->
 [![CRAN status](https://www.r-pkg.org/badges/version/mori)](https://CRAN.R-project.org/package=mori)
-[![R-CMD-check](https://github.com/shikokuchuo/mori/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/shikokuchuo/mori/actions/workflows/R-CMD-check.yaml)
-[![Codecov test coverage](https://codecov.io/gh/shikokuchuo/mori/graph/badge.svg)](https://app.codecov.io/gh/shikokuchuo/mori)
+[![R-CMD-check](https://github.com/r-lib/mori/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/r-lib/mori/actions/workflows/R-CMD-check.yaml)
+[![Codecov test coverage](https://codecov.io/gh/r-lib/mori/graph/badge.svg)](https://app.codecov.io/gh/r-lib/mori)
 <!-- badges: end -->
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shikokuchuo/mori)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/r-lib/mori)
 
 Shared Memory for R Objects
 
@@ -200,5 +200,5 @@ Copy-on-write makes sure that other processes continue to read the original shar
 
 --
 
-The mori project is released with a [Contributor Code of Conduct](https://shikokuchuo.net/mori/CODE_OF_CONDUCT.html).
+The mori project is released with a [Contributor Code of Conduct](https://r-lib.github.io/mori/CODE_OF_CONDUCT.html).
 When you contribute to this project, you agree to obey its terms.
