@@ -1,9 +1,9 @@
 # mori: Shared Memory for R Objects
 
 Share R objects via shared memory with
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md), access
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md), access
 them in other processes with
-[`map_shared()`](https://shikokuchuo.net/mori/dev/reference/map_shared.md),
+[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md),
 using R's ALTREP framework for zero-copy memory-mapped access. Shared
 objects serialize compactly via ALTREP serialization hooks. Shared
 memory is automatically freed when the R object is garbage collected.
@@ -12,11 +12,11 @@ memory is automatically freed when the R object is garbage collected.
 
 Useful links:
 
-- <https://shikokuchuo.net/mori/>
+- <https://r-lib.github.io/mori/>
 
-- <https://github.com/shikokuchuo/mori>
+- <https://github.com/r-lib/mori>
 
-- Report bugs at <https://github.com/shikokuchuo/mori/issues>
+- Report bugs at <https://github.com/r-lib/mori/issues>
 
 ## Author
 

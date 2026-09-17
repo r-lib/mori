@@ -70,9 +70,9 @@ which deep-duplicates the object:
 
 ## See also
 
-[`map_shared()`](https://shikokuchuo.net/mori/dev/reference/map_shared.md)
+[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md)
 to open a shared region by name,
-[`shared_name()`](https://shikokuchuo.net/mori/dev/reference/shared_name.md)
+[`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)
 to extract the shared memory name.
 
 ## Examples

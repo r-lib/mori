@@ -2,8 +2,8 @@
 
 Returns `TRUE` if `x` is an ALTREP object backed by shared memory
 (created by
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) or
-[`map_shared()`](https://shikokuchuo.net/mori/dev/reference/map_shared.md)),
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) or
+[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md)),
 `FALSE` otherwise.
 
 ## Usage

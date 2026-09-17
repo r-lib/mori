@@ -14,7 +14,7 @@ map_shared(name)
 - name:
 
   a character string as returned by
-  [`shared_name()`](https://shikokuchuo.net/mori/dev/reference/shared_name.md):
+  [`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md):
   either a bare shared memory name (opens the root) or a name with a
   1-based bracketed index path (e.g. `"/mori_abc_1[2,3]"`, opens the
   addressed sub-list or element directly).
@@ -29,9 +29,9 @@ or the path doesn't address a valid sub-object — an error is raised.
 
 ## See also
 
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) to
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) to
 create a shared object,
-[`shared_name()`](https://shikokuchuo.net/mori/dev/reference/shared_name.md)
+[`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)
 to extract the shared memory name.
 
 ## Examples

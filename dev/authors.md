@@ -11,15 +11,15 @@
 ## Citation
 
 Source:
-[`DESCRIPTION`](https://github.com/shikokuchuo/mori/blob/main/DESCRIPTION)
+[`DESCRIPTION`](https://github.com/r-lib/mori/blob/main/DESCRIPTION)
 
 Gao C (2026). *mori: Shared Memory for R Objects*. R package version
-0.2.2.9000, <https://shikokuchuo.net/mori/>.
+0.2.2.9000, <https://r-lib.github.io/mori/>.
 
     @Manual{,
       title = {mori: Shared Memory for R Objects},
       author = {Charlie Gao},
       year = {2026},
       note = {R package version 0.2.2.9000},
-      url = {https://shikokuchuo.net/mori/},
+      url = {https://r-lib.github.io/mori/},
     }

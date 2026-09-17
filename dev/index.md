@@ -1,11 +1,11 @@
 # mori
 
 [![Ask
-DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shikokuchuo/mori)
+DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/r-lib/mori)
 
 Shared Memory for R Objects
 
-→ [`share()`](https://shikokuchuo.net/mori/dev/reference/share.md)
+→ [`share()`](https://r-lib.github.io/mori/dev/reference/share.md)
 writes an R object into shared memory and returns a shared version
 
 → Compact ALTREP serialization — shared objects move through
@@ -38,7 +38,7 @@ Parallel computing multiplies memory. When 8 workers each need the same
 200 MB dataset, that is 1.6 GB of serialization, transfer, and
 deserialization. RAM holds 8 separate copies.
 
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) writes
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) writes
 the data into shared memory once. Each worker then maps the same
 physical pages. Per-worker copies become per-worker references.
 
@@ -79,12 +79,12 @@ boot_mean <- \(i, data) colMeans(data[sample(nrow(data), replace = TRUE), ])
 # Without mori — each daemon deserializes a full copy
 mirai_map(1:8, boot_mean, .args = list(data = df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.672  13.222   8.483
+#>   0.640  13.173   8.434
 
 # With mori — each daemon maps the same shared memory
 mirai_map(1:8, boot_mean, .args = list(data = shared_df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.002   0.004   4.736
+#>   0.002   0.004   4.827
 
 daemons(0)
 ```
@@ -95,9 +95,9 @@ Workers must run on the same machine, because mori shares physical RAM.
 
 ### Sharing by name
 
-[`shared_name()`](https://shikokuchuo.net/mori/dev/reference/shared_name.md)
+[`shared_name()`](https://r-lib.github.io/mori/dev/reference/shared_name.md)
 returns the shared memory name of a shared object.
-[`map_shared()`](https://shikokuchuo.net/mori/dev/reference/map_shared.md)
+[`map_shared()`](https://r-lib.github.io/mori/dev/reference/map_shared.md)
 opens a region by this name. This passes a reference between processes
 without serialization:
 
@@ -106,7 +106,7 @@ without serialization:
 x <- share(rnorm(1e6))
 
 shared_name(x)
-#> [1] "/mori_1574_9c6fbbc4"
+#> [1] "/mori_6cca_11b91a1d"
 ```
 
 ``` r
@@ -155,13 +155,13 @@ daemons(0)
 
 ### What gets shared
 
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) writes
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) writes
 all atomic vector types, lists, and data frames directly into shared
 memory. Attributes are preserved end-to-end. Pairlists become lists. The
 returned ALTREP wrappers point into the shared memory region. There is
 no deserialization and no per-process memory allocation.
 
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) returns
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) returns
 all other R objects (environments, closures, language objects)
 unchanged. It creates no shared memory region for them.
 
@@ -175,9 +175,9 @@ strings load on demand, one element at a time.
 
 df <- share(as.data.frame(matrix(rnorm(1e7), ncol = 100)))
 shared_name(df)        # one region for all 100 columns
-#> [1] "/mori_1574_9c6fbbc6"
+#> [1] "/mori_6cca_11b91a1f"
 shared_name(df[[50]])  # sub-path into the same region
-#> [1] "/mori_1574_9c6fbbc6[50]"
+#> [1] "/mori_6cca_11b91a1f[50]"
 ```
 
 ### Lifetime
@@ -185,19 +185,19 @@ shared_name(df[[50]])  # sub-path into the same region
 R’s garbage collector manages the shared memory. A region stays alive
 while R holds a reference to any object backed by it. The reference can
 be the original from
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md), or a
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md), or a
 column or sub-list extracted from it. This reference can be in the
 original or another process. When no references remain, or when the
 session exits cleanly, R frees the shared memory automatically.
 
 **Important:** Make sure that R does not garbage-collect the return
 value of
-[`share()`](https://shikokuchuo.net/mori/dev/reference/share.md) before
+[`share()`](https://r-lib.github.io/mori/dev/reference/share.md) before
 a consumer maps its shared memory.
 
 If a process dies before cleanup runs (a crash, `SIGKILL`, or the OOM
 killer), its region can be left behind.
-[`prune_shared()`](https://shikokuchuo.net/mori/dev/reference/prune_shared.md)
+[`prune_shared()`](https://r-lib.github.io/mori/dev/reference/prune_shared.md)
 reclaims these orphans. It removes only regions whose creating process
 is no longer running.
 
@@ -217,5 +217,5 @@ other processes continue to read the original shared data:
 –
 
 The mori project is released with a [Contributor Code of
-Conduct](https://shikokuchuo.net/mori/CODE_OF_CONDUCT.html). When you
+Conduct](https://r-lib.github.io/mori/CODE_OF_CONDUCT.html). When you
 contribute to this project, you agree to obey its terms.
