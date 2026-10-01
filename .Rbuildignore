@@ -17,3 +17,4 @@
 ^CODE_OF_CONDUCT\.md$
 ^.*\.Rproj$
 ^cran-comments\.md$
+^revdep$

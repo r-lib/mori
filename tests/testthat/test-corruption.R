@@ -52,6 +52,21 @@ mors_header <- function(n, str_data_size, attrs_size = 0) {
   c(i32(MORS), i32(attrs_size), i64(n), i64(str_data_size), raw(40L))
 }
 
+# The MORS string block: 64-byte sections — validity bitmap (1 = present),
+# (n + 1) i64 offsets, n encoding bytes, packed strings — each section
+# 64-byte aligned from the block start. Each section here fits its first 64
+# bytes (n <= 7), so the block is exactly 192 bytes.
+str_block <- function(n, offs, valid) {
+  stopifnot(n <= 7L)
+  c(
+    valid,
+    raw(64L - length(valid)),
+    unlist(lapply(offs, i64)),
+    raw(64L - 8L * length(offs)),
+    raw(64L)
+  )
+}
+
 # Write `bytes` to a fresh /dev/shm region with a well-formed mori name, arrange
 # for its removal when the calling test exits, and return the identifier. The
 # "f"-prefixed counter keeps these names clear of any real share() allocations.
@@ -118,15 +133,18 @@ test_that("element access errors when attrs exceed the element data", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
+  # raw(40L) pads the region so the entry's [128, 136) data claim is in
+  # bounds and the attrs_size check (not the offset checks) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
     morl_entry(
-      data_offset = 96,
+      data_offset = 128,
       data_size = 8,
       sexptype = REALSXP,
       attrs_size = 16,
       length = 1
-    )
+    ),
+    raw(40L)
   ))
   expect_error(map_shared(name)[[1]], "invalid element data")
 })
@@ -137,11 +155,12 @@ test_that("nested element access errors on a corrupt child region", {
   }
 
   # parent (n = 1) points element 0 at a full-header-size VECSXP child whose
-  # magic is wrong — large enough to pass the size check, so the magic
-  # check is the one that fires
+  # magic is wrong — the 64-aligned, in-bounds claim passes the size and
+  # alignment checks, so the magic check is the one that fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
-    morl_entry(data_offset = 96, data_size = 64, sexptype = VECSXP),
+    morl_entry(data_offset = 128, data_size = 64, sexptype = VECSXP),
+    raw(32L),
     c(i32(0L), raw(60L))
   ))
   expect_error(map_shared(name)[[1]], "invalid nested list region")
@@ -193,7 +212,7 @@ test_that("map_shared() errors when a string count exceeds its region", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  # 64-byte MORS region claims 1000 strings (table alone needs 16000 bytes)
+  # 64-byte MORS region claims 1000 strings (fixed sections alone need ~9 KB)
   name <- write_corrupt(mors_header(n = 1000, str_data_size = 0))
   expect_error(map_shared(name), "invalid string data")
 })
@@ -221,17 +240,17 @@ test_that("element access errors when a vector length exceeds its data", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  # raw(8L) pads the region so the entry's [96, 104) data claim is in bounds
-  # and the length check (not the offset check) fires
+  # raw(40L) pads the region so the entry's [128, 136) data claim is in
+  # bounds and the length check (not the offset checks) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
     morl_entry(
-      data_offset = 96,
+      data_offset = 128,
       data_size = 8,
       sexptype = REALSXP,
       length = 2^40
     ),
-    raw(8L)
+    raw(40L)
   ))
   expect_error(map_shared(name)[[1]], "invalid element data")
 })
@@ -241,72 +260,74 @@ test_that("element access errors on a negative element attrs size", {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  # raw(8L) pads the region so the entry's [96, 104) data claim is in bounds
-  # and the attrs_size check (not the offset check) fires
+  # raw(40L) pads the region so the entry's [128, 136) data claim is in
+  # bounds and the attrs_size check (not the offset checks) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
     morl_entry(
-      data_offset = 96,
+      data_offset = 128,
       data_size = 8,
       sexptype = REALSXP,
       attrs_size = -1,
       length = 1
     ),
-    raw(8L)
+    raw(40L)
   ))
   expect_error(map_shared(name)[[1]], "invalid element data")
 })
 
-test_that("element access errors when a string table exceeds its data", {
+test_that("element access errors when a string count exceeds its data", {
   if (Sys.info()[["sysname"]] != "Linux") {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  # raw(8L) pads the region so the entry's [96, 104) data claim is in bounds
-  # and the string table check (not the offset check) fires
+  # raw(40L) pads the region so the entry's [128, 136) data claim is in
+  # bounds and the string block check (not the offset checks) fires
   name <- write_corrupt(c(
     morl_header(n = 1L),
     morl_entry(
-      data_offset = 96,
+      data_offset = 128,
       data_size = 8,
       sexptype = STRSXP,
       length = 100
     ),
-    raw(8L)
+    raw(40L)
   ))
   expect_error(map_shared(name)[[1]], "invalid string data")
 })
 
-test_that("string access errors on an out-of-bounds offset table entry", {
+test_that("string access errors on an out-of-bounds string span", {
   if (Sys.info()[["sysname"]] != "Linux") {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  # Table fits (str_bytes = 0), but the sole entry claims 10 bytes at
-  # offset 1000 — caught at element access, not at open.
+  # The block's fixed sections fit the 192-byte claim and the two end
+  # offsets check out (first 0, last 0 = str_bytes), but string 1's span
+  # [0, 1000) exceeds the packed area — caught at element access, not open.
   name <- write_corrupt(c(
     morl_header(n = 1L),
-    morl_entry(data_offset = 96, data_size = 64, sexptype = STRSXP, length = 1),
-    i64(1000),
-    i32(10),
-    i32(0),
-    raw(48L)
+    morl_entry(
+      data_offset = 128,
+      data_size = 192,
+      sexptype = STRSXP,
+      length = 2
+    ),
+    raw(32L),
+    str_block(n = 2L, offs = c(0, 1000, 0), valid = as.raw(3L))
   ))
   s <- map_shared(name)[[1]]
   expect_error(s[1], "invalid string data")
 })
 
-test_that("root string access errors on an out-of-bounds offset table entry", {
+test_that("root string access errors on an out-of-bounds string span", {
   if (Sys.info()[["sysname"]] != "Linux") {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
+  # The same span-overrun craft as the nested case, at the region root.
   name <- write_corrupt(c(
-    mors_header(n = 1, str_data_size = 64),
-    i64(1000),
-    i32(10),
-    i32(0),
-    raw(48L)
+    mors_header(n = 2, str_data_size = 192),
+    str_block(n = 2L, offs = c(0, 1000, 0), valid = as.raw(3L))
   ))
   s <- map_shared(name)
   expect_error(s[1], "invalid string data")
@@ -324,17 +345,22 @@ test_that("map_shared() errors on an unsupported vector sexptype", {
   expect_error(map_shared(name), "unsupported ALTREP type")
 })
 
-test_that("element access errors when string table alignment exceeds its data", {
+test_that("element access errors when string block sections exceed their data", {
   if (Sys.info()[["sysname"]] != "Linux") {
     skip("requires file-backed /dev/shm (Linux only)")
   }
 
-  # n = 1: the 16-byte offset table fits the entry's 16-byte data claim, but
-  # the table's 64-byte alignment padding does not.
+  # n = 1: the block's fixed sections (192 bytes for one string) far exceed
+  # the entry's 16-byte data claim.
   name <- write_corrupt(c(
     morl_header(n = 1L),
-    morl_entry(data_offset = 96, data_size = 16, sexptype = STRSXP, length = 1),
-    raw(16L)
+    morl_entry(
+      data_offset = 128,
+      data_size = 16,
+      sexptype = STRSXP,
+      length = 1
+    ),
+    raw(48L)
   ))
   expect_error(map_shared(name)[[1]], "invalid string data")
 })

@@ -34,6 +34,11 @@ test_that("element reference keeps parent SHM alive through GC", {
 
   rm(col, y)
   gc()
+  # the consumer-mapping cache can still resolve nm after unlink; cycling it
+  # with 16 distinct regions evicts the entry and restores "not found"
+  keep <- lapply(1:16, function(i) share(runif(10)))
+  invisible(lapply(keep, function(z) map_shared(shared_name(z))))
+  gc()
   expect_error(map_shared(nm), "not found")
 })
 

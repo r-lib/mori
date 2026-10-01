@@ -1,6 +1,7 @@
 # R package build artifacts
 *.tar.gz
 *.Rcheck/
+revdep/
 src/*.o
 src/*.so
 src/*.dll
