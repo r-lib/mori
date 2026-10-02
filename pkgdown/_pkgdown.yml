@@ -1,5 +1,6 @@
 url: https://mori.r-lib.org
 template:
+  package: tidytemplate
   bootstrap: 5
 
   opengraph:

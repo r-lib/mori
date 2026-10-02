@@ -22,6 +22,7 @@ Suggests:
     mirai,
     testthat (>= 3.0.0)
 Config/build/compilation-database: true
+Config/Needs/website: tidyverse/tidytemplate
 Config/roxygen2/markdown: TRUE
 Config/roxygen2/version: 8.1.0
 Config/testthat/edition: 3
