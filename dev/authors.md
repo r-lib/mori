@@ -2,10 +2,11 @@
 
 ## Authors
 
-- **Charlie Gao**. Author, maintainer.
+- **[Charlie Gao](https://github.com/shikokuchuo)**. Author, maintainer.
   [](https://orcid.org/0000-0002-0750-061X)
 
-- **Posit Software, PBC**. Copyright holder, funder.
+- **[![Posit](https://www.tidyverse.org/posit-logo.svg)](https://www.posit.co)**.
+  Copyright holder, funder.
   [![ROR](https://raw.githubusercontent.com/ror-community/ror-logos/main/ror-icon-rgb.svg)](https://ror.org/03wc8by49)
 
 ## Citation
