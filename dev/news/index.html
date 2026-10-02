@@ -40,7 +40,8 @@
 
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="development version" id="mori-development-version">mori (development version)<a class="anchor" aria-label="anchor" href="#mori-development-version"></a></h2>
-<ul><li>Region layouts now open with a 64-byte header.</li>
+<ul><li>The C layer is now vendored from mizu (ALTREP view layer) and libmizu (shared-memory region layer) via <code>tools/vendor.sh</code>; the string region layout is now Arrow large_utf8-shaped.</li>
+<li>Region layouts now open with a 64-byte header.</li>
 <li>
 <code><a href="../reference/share.html">share()</a></code> now supports S4 objects built on vectors or lists (previously the S4 object bit was silently dropped).</li>
 <li>

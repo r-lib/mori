@@ -2,6 +2,9 @@
 
 ## mori (development version)
 
+- The C layer is now vendored from mizu (ALTREP view layer) and libmizu
+  (shared-memory region layer) via `tools/vendor.sh`; the string region
+  layout is now Arrow large_utf8-shaped.
 - Region layouts now open with a 64-byte header.
 - [`share()`](https://mori.r-lib.org/dev/reference/share.md) now
   supports S4 objects built on vectors or lists (previously the S4

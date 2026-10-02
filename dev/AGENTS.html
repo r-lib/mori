@@ -50,15 +50,25 @@
 <span><span class="fu">devtools</span><span class="fu">::</span><span class="fu">document</span><span class="op">(</span><span class="op">)</span>                                <span class="co"># roxygen2 -&gt; man/, NAMESPACE</span></span>
 <span><span class="fu">rmarkdown</span><span class="fu">::</span><span class="fu"><a href="https://pkgs.rstudio.com/rmarkdown/reference/render.html" class="external-link">render</a></span><span class="op">(</span><span class="st">"README.Rmd"</span><span class="op">)</span>                     <span class="co"># rebuild README.md</span></span></code></pre></div>
 <div class="sourceCode" id="cb2"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="ex">R</span> CMD build .</span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="ex">R</span> CMD check <span class="at">--no-manual</span> <span class="at">--compact-vignettes</span><span class="op">=</span>gs+qpdf mori_<span class="pp">*</span>.tar.gz   <span class="co"># matches CI</span></span></code></pre></div>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="ex">R</span> CMD check <span class="at">--no-manual</span> <span class="at">--compact-vignettes</span><span class="op">=</span>gs+qpdf mori_<span class="pp">*</span>.tar.gz   <span class="co"># matches CI</span></span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a><span class="fu">bash</span> tools/vendor.sh                    <span class="co"># re-vendor both layers: region (shm.c, err_tls.c, mori_region.h) from libmizu, view (mori.h, altrep.c, serialize.c) from mizu</span></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a><span class="fu">bash</span> tools/vendor.sh <span class="at">--region-only</span>      <span class="co"># region layer only; --view-only for the view layer; --mizu/--libmizu override the refs</span></span></code></pre></div>
 <ul><li>
 <code>Config/build/compilation-database: true</code> in DESCRIPTION → <code>compile_commands.json</code> on install (gitignored); clangd works out of the box.</li>
-<li>R’s in-source build ignores header dependencies: after editing <code>mori.h</code>, <code>rm src/*.o src/*.so</code> before reinstalling — stale objects linked against old struct layouts cause sizeof mismatches and garbage fields.</li>
+<li>R’s in-source build ignores header dependencies: after re-vendoring, <code>rm src/*.o src/*.so</code> before reinstalling — stale objects linked against old struct layouts cause sizeof mismatches and garbage fields.</li>
+<li>
+<code>src/shm.c</code>, <code>src/err_tls.c</code> and <code>src/mori_region.h</code> are vendored from libmizu by <code>tools/vendor.sh</code> (pinned ref, enumerated substitutions, self-grep gate) — never edit them by hand; changes go upstream to libmizu and are pulled by re-running the script. <code>mori_region.h</code> also carries the carved wire-format helpers (<code>mori_mors_geometry</code>, <code>mori_morh_validity_set</code>, <code>mori_na_build</code>, the MIZL directory-entry reader <code>mori_morl_elem</code> and its chain, the type tags) the view layer resolves onto.</li>
+<li>
+<code>src/mori.h</code>, <code>src/altrep.c</code> and <code>src/serialize.c</code> — the view layer: the ALTREP consumer classes, the MORH/MORS/MORL layout oracle/writer, and the exact-size serialize streams — are vendored from <strong>mizu</strong> by the same script (pinned ref, the reverse substitution set, self-grep gate). The layouts have a single home: the canonical layer is first-class code in mizu and mori tracks it, so the byte format cannot drift between the two packages. Never edit these files by hand either; changes go upstream to mizu. Unless <code>--libmizu</code> is given, the region layer’s ref is derived from the libmizu pin recorded in mizu’s own <code>src/vendor/libmizu/VENDOR</code> — the pairing mizu was built against.</li>
 </ul></div>
 <div class="section level2">
 <h2 id="storage-model">Storage Model<a class="anchor" aria-label="anchor" href="#storage-model"></a></h2>
 <ul><li>
-<strong>Zero-copy (SHM-backed)</strong>: atomic vectors (any type/attributes) and data frame columns are written into SHM and ALTREP-backed on consumers; attributes serialize into a trailing region, reapplied on open. Numeric <code>Dataptr_or_null</code> returns the SHM pointer; <code>Dataptr(writable=TRUE)</code> triggers COW into a private copy. String <code>Elt</code> creates CHARSXPs lazily; <code>Dataptr_or_null</code> returns NULL to force per-element access.</li>
+<strong>Zero-copy (SHM-backed)</strong>: atomic vectors (any type/attributes) and data frame columns are written into SHM and ALTREP-backed on consumers; attributes serialize into a trailing region, reapplied on open. Numeric <code>Dataptr_or_null</code> returns the SHM pointer; <code>Dataptr(writable=TRUE)</code> triggers COW into a private copy. Strings live in an Arrow large_utf8-shaped block (validity bitmap + i64 offsets + encoding bytes + packed data); <code>Elt</code> creates CHARSXPs lazily; <code>Dataptr_or_null</code> returns NULL to force per-element access.</li>
+<li>
+<strong>Validity bitmaps</strong>: MORS string blocks carry one always — it is the NA test at string <code>Elt</code> (strings have no sentinel). The MORH/MORL header sections [40-55] are cross-language surface only: three states ({0,0} absent, {0,-1} known-NA-free, else bitmap offset + null count), built solely by the foreign staging mode (<code>foreign = 1</code>, embedders); the host path leaves them absent (NAs ride the sentinels) and no mori reader consults them.</li>
+<li>
+<strong>int64</strong>: class-only <code>integer64</code> vectors (REALSXP storage, no S4, non-ALTREP; the <code>_any</code> test admits ALTREP storage) ride the wire as tag 32 (<code>MORI_TYPE_INT64</code>) in the header sexptype / directory entry — no attrs blob (the tag carries the class).</li>
 <li>
 <strong>Nested lists (zero-copy)</strong>: VECSXP/LISTSXP elements are written inline as a complete child MORL region at their <code>data_offset</code>, each level wrapped in its own ALTLIST. Sub-lists are <code><a href="reference/is_shared.html">is_shared()</a></code>-TRUE with path-bearing <code><a href="reference/shared_name.html">shared_name()</a></code>s; <code>map_shared(shared_name(sub))</code> opens them directly. The OS region name is the prefix before <code>[</code> (<code>sub("\\[.*$", "", shared_name(x))</code>).</li>
 <li>
@@ -68,7 +78,7 @@
 <h2 id="concurrency-model">Concurrency Model<a class="anchor" aria-label="anchor" href="#concurrency-model"></a></h2>
 <p><strong>Write-once on host, read-many on consumers, COW for any mutation.</strong></p>
 <ul><li>Each <code><a href="reference/share.html">share()</a></code> allocates a fresh region; existing regions are never mutated. No locking anywhere — any change admitting in-place mutation breaks the model.</li>
-<li>Names embed creator PID + randomly-seeded per-process counter (<code>mori_&lt;pid&gt;_&lt;counter&gt;</code>, <code>mori_region_name</code>). <code>mori_shm_create</code> uses <code>O_EXCL</code> / <code>ERROR_ALREADY_EXISTS</code>; a collision (orphan of a crashed same-PID process) is an error (<code>MORI_EEXIST</code>), never worked around by reuse.</li>
+<li>Names embed creator PID + randomly-seeded per-process counter (<code>mori_&lt;pid&gt;_&lt;counter&gt;</code>, <code>mori_region_name</code>). <code>mori_shm_create</code> uses <code>O_EXCL</code> / <code>ERROR_ALREADY_EXISTS</code>; a collision (orphan of a crashed same-PID process) is an error (<code>MORI_ERRCAT_EXISTS</code>), never worked around by reuse.</li>
 <li>
 <code><a href="reference/prune_shared.html">prune_shared()</a></code> clears such orphans; it must run while the PID is free — a live process cannot reap its own names.</li>
 <li>The host writes the full region before its name is observable — partial writes are never seen. Consumer mappings are read-only (<code>PROT_READ</code> / <code>FILE_MAP_READ</code>); mutation triggers COW.</li>
@@ -77,28 +87,28 @@
 <div class="section level2">
 <h2 id="share-dispatch-altrepc-mori_create">share() Dispatch (<code>altrep.c: mori_create</code>)<a class="anchor" aria-label="anchor" href="#share-dispatch-altrepc-mori_create"></a></h2>
 <ol start="0" style="list-style-type: decimal"><li>Already mori-backed (<code>mori_view_check</code>) → return <code>x</code> unchanged. Idempotence required: re-sharing a sub-list view must not allocate a fresh root region (would break <code><a href="reference/shared_name.html">shared_name()</a></code>).</li>
-<li>Otherwise sizes via <code>mori_layout_size_impl</code> (<code>ok = NULL</code> here — no vetoes; non-mori ALTREPs materialize through <code>DATAPTR_RO</code> at write) and writes via <code>mori_layout_write</code>; 0 size → <code>x</code> returned as-is. Type ladder: <code>VECSXP</code>/<code>LISTSXP</code> → MORL (pairlists coerced to VECSXP at every level; data frames included), <code>STRSXP</code> → MORS, atomics (<code>REALSXP</code>/<code>INTSXP</code>/<code>LGLSXP</code>/<code>RAWSXP</code>/<code>CPLXSXP</code>) → MORH, everything else (incl. <code>NILSXP</code>) → pass-through.</li>
+<li>Otherwise sizes via <code>mori_layout_size_impl(x, NULL, 0)</code> (<code>ok = NULL</code>, <code>foreign = 0</code> — no vetoes; non-mori ALTREPs materialize through <code>DATAPTR_RO</code> at write) and writes via <code>mori_layout_write(base, x, 0)</code>; 0 size → <code>x</code> returned as-is. Type ladder: <code>VECSXP</code>/<code>LISTSXP</code> → MORL (pairlists coerced to VECSXP at every level; data frames included), <code>STRSXP</code> → MORS, atomics (<code>REALSXP</code>/<code>INTSXP</code>/<code>LGLSXP</code>/<code>RAWSXP</code>/<code>CPLXSXP</code>) → MORH, everything else (incl. <code>NILSXP</code>) → pass-through.</li>
 </ol><p>The result returns via <code>mori_make_result</code>, which chains the host extptr into the ALTREP’s keeper chain (see Internal State and Lifetime).</p>
 <div class="section level3">
 <h3 id="two-pass-write-invariant">Two-pass write invariant<a class="anchor" aria-label="anchor" href="#two-pass-write-invariant"></a></h3>
-<p>All writers are count-then-write pairs: <code>mori_serialize_count</code>/<code>mori_serialize_into</code> (serialize.c, fallback bytes), <code>mori_nested_size</code>/<code>mori_nested_write</code> (MORL regions), <code>morh_size</code>/<code>morh_write</code>, <code>mors_size</code>/<code>mors_write</code>. <strong>If a pair disagrees by even one byte, the region is malformed and consumers read garbage.</strong> Mirror every change in both sides.</p>
+<p>All writers are count-then-write pairs: <code>mori_serialize_count</code>/<code>mori_serialize_into</code> (serialize.c, fallback bytes), <code>mori_attrs_size</code>/<code>mori_attrs_write</code> (attribute blobs, honoring the embedder hooks), <code>mori_nested_size</code>/<code>mori_nested_write</code> (MORL regions), <code>morh_size</code>/<code>morh_write</code>, <code>mors_size</code>/<code>mors_write</code>. <strong>If a pair disagrees by even one byte, the region is malformed and consumers read garbage.</strong> Mirror every change in both sides. Exception by design: the foreign staging mode (<code>foreign = 1</code>) reserves validity-section bytes in the size pass that a clean (NA-free) write never spends — there the write returns the actual bytes used, always ≤ the size pass; on the host path (<code>foreign = 0</code>) the two agree exactly.</p>
 </div>
 </div>
 <div class="section level2">
 <h2 id="embedder-c-api">Embedder C API<a class="anchor" aria-label="anchor" href="#embedder-c-api"></a></h2>
 <p>Declared in <code>mori.h</code>, C-level only (not <code>.Call</code>) — for packages embedding mori layouts under their own SHM management:</p>
 <ul><li>
-<strong>Layout oracle + writer</strong>: <code>mori_layout_size(x)</code> → region size, or 0 for what the writer must not take (ALTREP nodes that are neither mori views nor directly readable with no keeper chain — <code>mori_altrep_readable</code>; R’s S4 data-part wrappers qualify). The S4 object bit rides the layouts: header flags word at offset 32 (<code>MORI_FLAG_S4</code>) for MORH/MORS/MORL roots and nested lists, bit 30 of the directory entry’s <code>sexptype</code> (<code>MORI_ELEM_S4</code>) for vector/string leaves; applied with <code>Rf_asS4</code> after attributes land. Vetoes ride the size recursion (<code>mori_layout_size_impl</code> with <code>ok != NULL</code>); the host path passes <code>NULL</code> and vetoes nothing. <code>mori_layout_write(base, x)</code> emits exactly <code>mori_layout_size</code> bytes and zeroes reserved header bytes [24-63] on every write (embedders may recycle regions).</li>
+<strong>Layout oracle + writer</strong>: <code>mori_layout_size(x, foreign)</code> → region size, or 0 for what the writer must not take (ALTREP nodes that are neither mori views nor directly readable with no keeper chain — <code>mori_altrep_readable</code>; R’s S4 data-part wrappers qualify). The S4 object bit rides the layouts: header flags word at offset 32 (<code>MORI_FLAG_S4</code>) for MORH/MORS/MORL roots and nested lists, bit 30 of the directory entry’s <code>sexptype</code> (<code>MORI_ELEM_S4</code>) for vector/string leaves; applied with <code>Rf_asS4</code> after attributes land. Vetoes ride the size recursion (<code>mori_layout_size_impl</code> with <code>ok != NULL</code>); the host path passes <code>NULL</code> and vetoes nothing. <code>mori_layout_write(base, x, foreign)</code> returns the actual bytes written: exactly <code>mori_layout_size</code> when <code>foreign == 0</code>, at most that in the foreign staging mode (clean leaves’ unspent validity reserve); it zeroes reserved header bytes [24-63] on every write (embedders may recycle regions). <code>foreign = 1</code> relaxes the ALTREP veto (admitted atomic ALTREPs copy through <code>*_GET_REGION</code>, never materializing the sender’s vector) and builds the validity-bitmap sections.</li>
 <li>
-<strong>Wrap constructors</strong>: <code>mori_vec_wrap</code> / <code>mori_str_wrap</code> / <code>mori_list_wrap</code> build views over embedder memory, pinning <code>keeper</code> via the data1 extptr’s protected slot; each takes a <code>release</code> once-hook (see Internal State). <code>mori_restore_attrs</code> reapplies trailing serialized attributes.</li>
+<strong>Wrap constructors</strong>: <code>mori_vec_wrap</code> / <code>mori_str_wrap</code> / <code>mori_list_wrap</code> build views over embedder memory, pinning <code>keeper</code> via the data1 extptr’s protected slot; each takes a <code>release</code> once-hook (see Internal State). <code>mori_restore_attrs</code> reapplies a trailing attribute blob: the embedder’s encoding via the read hook when the blob’s first byte is the ‘I’ interchange magic (<code>MORI_INTEROP_MAGIC</code>), else <code>R_Unserialize</code>.</li>
 <li>
-<strong>Introspection + path walk</strong>: <code>mori_view_check</code>, <code>mori_shm_name</code>, <code>mori_parse_id</code>, <code>mori_walk_path</code> (walks an index path over an open region; the caller’s keeper flows into the result’s chain).</li>
+<strong>Introspection + resolve</strong>: <code>mori_view_check</code>, <code>mori_shm_name</code>, <code>mori_parse_id</code>, <code>mori_walk_path</code> (walks an index path over an open region; the caller’s keeper flows into the result’s chain), <code>mori_is_int64</code> / <code>mori_is_int64_any</code>, <code>mori_resolve_id(id, keeper)</code> (the one identifier resolve path: parse, open-or-cache, wrap root or walk, fire the resolve hook; a non-NULL <code>keeper</code> composes behind a fresh chain terminus), <code>mori_release_now(x)</code> (fires a view’s armed release hook ahead of GC; once-only).</li>
 <li>
-<strong>Wire hooks</strong>: <code>mori_set_wire_hooks(emit, resolve)</code> — see Serialization Hooks.</li>
+<strong>Hooks</strong>: <code>mori_set_wire_hooks(emit, resolve)</code> — see Serialization Hooks. <code>mori_set_attrs_hooks(size, write, read)</code> — embedder attribute-blob encoding (e.g. the ‘I’ interchange stream); a zero <code>size</code> return declines and the blob falls back to an R_Serialize stream (a decline after a nonzero size is a bug, never a fallback). <code>mori_set_open_hook</code> — custom consumer open (e.g. page-0-RW for a refcount protocol).</li>
 </ul></div>
 <div class="section level2">
 <h2 id="altrep-classes">ALTREP Classes<a class="anchor" aria-label="anchor" href="#altrep-classes"></a></h2>
-<p>Registered in <code>mori_altrep_init</code>. Numerics (<code>mori_real</code>/<code>integer</code>/<code>logical</code>/<code>raw</code>/<code>complex</code>) share the <code>mori_vec</code> pattern (SHM-backed data pointer). <code>mori_string</code> (<code>mori_str</code>) does lazy per-element <code>Elt</code> via <code>Rf_mkCharLenCE</code>, bounds-checking each offset-table entry against <code>str_bytes</code> and range-checking the encoding. <code>mori_list</code> (<code>mori_list_view</code>) has a per-element directory and a lazy <code>Elt</code> cache using <code>R_NilValue</code> as the uncached sentinel (a fresh VECSXP is NIL-filled — zero init work). NIL elements are the sole singleton output of <code>mori_unwrap_element</code>’s fallback path, so they’re never cached and identity is preserved.</p>
+<p>Registered in <code>mori_altrep_init</code>. Numerics (<code>mori_real</code>/<code>integer</code>/<code>logical</code>/<code>raw</code>/<code>complex</code>) share the <code>mori_vec</code> pattern (SHM-backed data pointer). <code>mori_string</code> (<code>mori_str</code>) does lazy per-element <code>Elt</code> via <code>Rf_mkCharLenCE</code>: NA from the validity bitmap (<code>mori_str_valid</code>), the span <code>[offsets[i], offsets[i+1])</code> bounds-checked against <code>str_bytes</code> (and <code>INT_MAX</code>), the encoding byte range-checked; the two end offsets are checked O(1) at wrap (<code>mori_str_wrap</code>). <code>mori_list</code> (<code>mori_list_view</code>) has a per-element directory and a lazy <code>Elt</code> cache using <code>R_NilValue</code> as the uncached sentinel (a fresh VECSXP is NIL-filled — zero init work). NIL elements are the sole singleton output of <code>mori_unwrap_element</code>’s fallback path, so they’re never cached and identity is preserved.</p>
 <div class="section level3">
 <h3 id="cow-invariant-for-new-altrep-methods">COW invariant for new ALTREP methods<a class="anchor" aria-label="anchor" href="#cow-invariant-for-new-altrep-methods"></a></h3>
 <p>Any method returning a writable pointer (or mutating) <strong>must check <code>R_altrep_data2(x)</code> first</strong> — if non-null, the vector is materialized and the SHM pointer is no longer authoritative. New <code>Dataptr</code> / coercion methods routinely forget this. COW materialization also fires the view’s release hook early (see Internal State).</p>
@@ -110,9 +120,9 @@
 <ul><li>
 <strong>Wire form (single canonical shape)</strong>: <code>mori_format_chain</code> is the single source of truth for <code>mori_shm_name</code> (the <code>.Call</code>) and all <code>Serialized_state</code> methods — walks the keeper chain collecting <code>view-&gt;index</code> (<code>&gt;= 0</code> only), formats <code>&lt;prefix&gt;</code> (root) or <code>&lt;prefix&gt;[i1+1,...]</code> (sub-object). 1-based externalisation cues R’s <code>[[i]]</code>; the parser converts back.</li>
 <li>
-<strong>Unserialize</strong>: <code>mori_Unserialize</code> (vec/list) and <code>mori_string_Unserialize</code>. Vec/list: a STRSXP state is always an identifier (their fallbacks are never STRSXP) — probed via <code>mori_shm_open_and_wrap</code>, a miss errors (corrupt stream); other states are materialized data. Strings: both forms are string-like, so the fallback is wrapped in a length-1 VECSXP (<code>mori_wrap_string_state</code>) — bare STRSXP = identifier, wrapper = data (unwrapped without probing). Path-form identifiers route through <code>mori_open_path_c</code> → <code>mori_walk_path</code>: intermediates step via <code>mori_make_view_extptr</code> (bare keeper-chain extptrs, no ALTLIST/attrs — never observed), leaf via <code>mori_unwrap_element</code>.</li>
+<strong>Unserialize</strong>: <code>mori_Unserialize</code> (vec/list) and <code>mori_string_Unserialize</code>. Vec/list: a STRSXP state is always an identifier (their fallbacks are never STRSXP) — probed via <code>mori_shm_open_and_wrap</code>, a miss errors (corrupt stream); other states are materialized data. Strings: both forms are string-like, so the fallback is wrapped in a length-1 VECSXP (<code>mori_wrap_string_state</code>) — bare STRSXP = identifier, wrapper = data (unwrapped without probing). All identifier resolves route through <code>mori_resolve_id</code> (parse, open-or-cache through the consumer LRU, wrap the root or walk the path, fire the resolve hook); the walk’s intermediates step via <code>mori_make_extptr</code> (bare keeper-chain extptrs, no ALTLIST/attrs — never observed), leaf via <code>mori_unwrap_element</code>.</li>
 <li>
-<strong>Wire hooks</strong> (<code>mori_set_wire_hooks</code>, set once at embedder load): <code>emit(view)</code> fires from <code>Serialized_state</code> when an identifier (not a materialization) is emitted; <code>resolve(view, shm)</code> fires after the wrap on the resolve paths (<code>mori_shm_open_and_wrap</code>, <code>mori_open_path_c</code> — not <code>mori_walk_path</code>, whose direct callers fire their own). Supports a cross-process lifetime protocol: flag regions on escape, count remote references on arrival.</li>
+<strong>Wire hooks</strong> (<code>mori_set_wire_hooks</code>, set once at embedder load): <code>emit(view)</code> fires from <code>Serialized_state</code> when an identifier (not a materialization) is emitted; <code>resolve(view, shm)</code> fires after the wrap inside <code>mori_resolve_id</code> — not <code>mori_walk_path</code>, whose direct callers fire their own. Supports a cross-process lifetime protocol: flag regions on escape, count remote references on arrival.</li>
 </ul><p>Fallback to full materialization when: data2 is set (COW’d), or nesting exceeds <code>MORI_MAX_PATH</code> (64).</p>
 <div class="section level3">
 <h3 id="identifier-grammar">Identifier grammar<a class="anchor" aria-label="anchor" href="#identifier-grammar"></a></h3>
@@ -124,14 +134,14 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 </div>
 <div class="section level3">
 <h3 id="validation-contract">Validation contract<a class="anchor" aria-label="anchor" href="#validation-contract"></a></h3>
-<p><code>map_shared</code> and unserialize share <code>mori_parse_id</code> for shape validation but differ in failure mode: <strong>malformed → <code>NULL</code></strong> (wrong type/length, <code>NA</code>, bad prefix/path); <strong>well-formed but unmappable → error</strong> (missing region, bad magic, truncated header, OOB index, non-VECSXP intermediate, fields inconsistent with mapped size). Consumer validation is total — corrupt input errors, never reads out of bounds: root headers vs mapped size (<code>mori_open_vector</code>/<code>mori_open_string</code>), directory entries vs data region (<code>mori_unwrap_element</code>), string tables vs region (<code>mori_str_wrap</code>), offset entries at <code>Elt</code>. Preserve this split in <code>mori_shm_open_and_wrap</code> — collapsing it either way breaks the probe-vs-corruption distinction.</p>
+<p><code>map_shared</code> and unserialize share <code>mori_parse_id</code> for shape validation but differ in failure mode: <strong>malformed → <code>NULL</code></strong> (wrong type/length, <code>NA</code>, bad prefix/path); <strong>well-formed but unmappable → error</strong> (missing region, bad magic, truncated header, OOB index, non-VECSXP intermediate, fields inconsistent with mapped size). Consumer validation is total — corrupt input errors, never reads out of bounds: root headers vs mapped size (<code>mori_open_vector</code>/<code>mori_open_string</code>), the format flags word at every header read (<code>mori_flags_known</code> — an unknown set bit rejects as corrupt-or-newer), directory entries vs data region incl. the 64-byte alignment of <code>data_offset</code> (<code>mori_unwrap_element</code>), string blocks vs region (<code>mori_str_wrap</code>, O(1) on the two end offsets), spans at <code>Elt</code>. Preserve this split in <code>mori_shm_open_and_wrap</code> — collapsing it either way breaks the probe-vs-corruption distinction.</p>
 </div>
 </div>
 <div class="section level2">
 <h2 id="shm-region-layouts">SHM Region Layouts<a class="anchor" aria-label="anchor" href="#shm-region-layouts"></a></h2>
-<p>Magic in the first 4 bytes (<code>MORI_MAGIC_*</code>): MORH <code>0x4D4F5248</code> vector, MORL <code>0x4D4F524C</code> list, MORS <code>0x4D4F5253</code> string. Every layout opens with a 64-byte header; bytes [24-31] are reserved for embedder cross-process state, [32-35] hold a mori flags word (bit 0: S4 object bit), [36-63] are reserved (all zeroed on every write — embedders may recycle regions). Tables are the canonical spec; <code>mori_nested_write</code> / <code>morh_write</code> / <code>mors_write</code> (with <code>mori_serialize_into</code> for fallbacks and attrs) are the implementations. Attributes are serialized R objects (pairlist on R &lt; 4.6, named list otherwise); <code>mori_restore_attrs</code> reapplies them on the consumer.</p>
+<p>Magic in the first 4 bytes (<code>MORI_MAGIC_*</code>): MORH <code>0x4D4F5248</code> vector, MORL <code>0x4D4F524C</code> list, MORS <code>0x4D4F5253</code> string. Every layout opens with a 64-byte header; bytes [24-31] are reserved for embedder cross-process state, [32-35] hold the format flags word (bit 0: S4 object bit; any other set bit rejects the region as corrupt-or-newer — <code>mori_flags_known</code>), [36-39] are reserved, [40-47]/[48-55] hold the optional validity section for MORH and MORL (i64 offset, i64 null count: {0,0} absent, {0,-1} known-NA-free, else the offset of a 64-byte-aligned bitmap section; MORS carries its bitmap in the string block instead), [56-63] are reserved (all zeroed on every write — embedders may recycle regions). Tables are the canonical spec; <code>mori_nested_write</code> / <code>morh_write</code> / <code>mors_write</code> (with <code>mori_attrs_write</code> or <code>mori_serialize_into</code> for attrs and fallbacks) are the implementations. Attributes are serialized R objects (pairlist on R &lt; 4.6, named list otherwise) unless the embedder attrs hooks supply another encoding; <code>mori_restore_attrs</code> reapplies them on the consumer.</p>
 <p><strong>MORH — atomic vector.</strong> Data at byte 64 (64-byte aligned for SIMD); trailing attrs after the data.</p>
-<table class="table"><thead><tr><th>Offset</th>
+<table class="table"><colgroup><col width="38%"><col width="28%"><col width="33%"></colgroup><thead><tr><th>Offset</th>
 <th>Size</th>
 <th>Field</th>
 </tr></thead><tbody><tr><td>0</td>
@@ -139,7 +149,7 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>magic</td>
 </tr><tr><td>4</td>
 <td>4</td>
-<td>sexptype</td>
+<td>sexptype (<code>MORI_TYPE_INT64</code> = 32 for class-only integer64 — no attrs)</td>
 </tr><tr><td>8</td>
 <td>8</td>
 <td>length (int64)</td>
@@ -153,14 +163,23 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>4</td>
 <td>flags (bit 0: S4 object bit)</td>
 </tr><tr><td>36</td>
-<td>28</td>
+<td>4</td>
+<td>reserved (zero)</td>
+</tr><tr><td>40</td>
+<td>8</td>
+<td>validity bitmap offset (0 = absent / known-NA-free)</td>
+</tr><tr><td>48</td>
+<td>8</td>
+<td>null count (0 or -1 when offset is 0)</td>
+</tr><tr><td>56</td>
+<td>8</td>
 <td>reserved (zero)</td>
 </tr><tr><td>64+</td>
 <td></td>
 <td>raw vector data</td>
 </tr><tr><td>64 + length×elt_size</td>
 <td></td>
-<td>serialized attributes (if <code>attrs_size</code> &gt; 0)</td>
+<td>serialized attributes (if <code>attrs_size</code> &gt; 0), then the optional validity bitmap (foreign writes)</td>
 </tr></tbody></table><p><strong>MORL — ALTLIST.</strong> Header + element directory + per-element data regions.</p>
 <table class="table"><colgroup><col width="38%"><col width="28%"><col width="33%"></colgroup><thead><tr><th>Offset</th>
 <th>Size</th>
@@ -184,16 +203,25 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>4</td>
 <td>flags (bit 0: S4 object bit)</td>
 </tr><tr><td>36</td>
-<td>28</td>
+<td>4</td>
+<td>reserved (zero)</td>
+</tr><tr><td>40</td>
+<td>8</td>
+<td>validity table offset (0 = absent / known-NA-free)</td>
+</tr><tr><td>48</td>
+<td>8</td>
+<td>total null count across leaves (0 or -1 when offset is 0)</td>
+</tr><tr><td>56</td>
+<td>8</td>
 <td>reserved (zero)</td>
 </tr><tr><td>64</td>
 <td>32×n</td>
 <td>element directory</td>
 </tr><tr><td>varies</td>
 <td></td>
-<td>element data (64-byte aligned), then serialized attributes</td>
-</tr></tbody></table><p>Directory entry (32 bytes): <code>data_offset(8) + data_size(8) + sexptype(4) + attrs_size(4) + length(8)</code>. <code>sexptype</code>: <code>0</code> → serialized bytes (serialize.c); <code>STRSXP</code> → offset table + packed strings at <code>data_offset</code>; <code>VECSXP</code> → nested MORL region inlined at <code>data_offset</code> of size <code>data_size</code> (child header/directory/elements/attrs all inline; parent’s <code>attrs_size</code> always 0 for VECSXP children); other → raw zero-copy data, with bit 30 of <code>sexptype</code> (<code>MORI_ELEM_S4</code>) flagging an S4 leaf (masked off at read). Non-VECSXP attrs sit at <code>data_offset + data_size - attrs_size</code>.</p>
-<p><strong>MORS — ALTSTRING.</strong> Header + offset table + packed string bytes + optional trailing attrs.</p>
+<td>element data (each 64-byte aligned), then serialized attributes, then the optional validity tail (foreign writes)</td>
+</tr></tbody></table><p>Directory entry (32 bytes): <code>data_offset(8, 64-byte aligned — enforced at read) + data_size(8) + sexptype(4) + attrs_size(4) + length(8)</code>. <code>sexptype</code>: <code>0</code> → serialized bytes (serialize.c); <code>STRSXP</code> → a string block (the MORS body layout) at <code>data_offset</code>; <code>VECSXP</code> → nested MORL region inlined at <code>data_offset</code> of size <code>data_size</code> (child header/directory/elements/attrs all inline; parent’s <code>attrs_size</code> always 0 for VECSXP children); <code>MORI_TYPE_INT64</code> (32) → class-only integer64 leaf (the tag carries the class — no attrs blob); <code>33</code> → remote leaf (the column lives in another region: <code>data_offset</code>/<code>data_size</code> span its identifier — name with optional index path, 1-255 bytes — resolved by reference through the consumer open + path walk, with the entry’s length/attrs/NA claims cross-checked against the referenced region; read-side only, no mori writer emits it, and the S4 bit is never set); other → raw zero-copy data, with bit 30 of <code>sexptype</code> (<code>MORI_ELEM_S4</code>) flagging an S4 leaf (masked off at read). Non-VECSXP attrs sit at <code>data_offset + data_size - attrs_size</code>. The foreign-mode validity tail: one LSB-first bitmap per NA-capable atomic leaf (1 = present, spent only where NAs are present), then an n-entry table of {i64 offset, i64 null count} pairs the header’s validity words point at; a VECSXP/STRSXP leaf’s pair is {0,0} (the nested header / string block carries its own).</p>
+<p><strong>MORS — ALTSTRING.</strong> Header + string block + optional trailing attrs.</p>
 <table class="table"><colgroup><col width="38%"><col width="28%"><col width="33%"></colgroup><thead><tr><th>Offset</th>
 <th>Size</th>
 <th>Field</th>
@@ -208,7 +236,7 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>n_strings (int64)</td>
 </tr><tr><td>16</td>
 <td>8</td>
-<td>str_data_size (int64: offset-table start → end of packed strings, incl. padding)</td>
+<td>str_data_size (int64: the string block’s byte size, incl. padding)</td>
 </tr><tr><td>24</td>
 <td>8</td>
 <td>reserved (zero) — embedder cross-process state</td>
@@ -219,15 +247,12 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <td>28</td>
 <td>reserved (zero)</td>
 </tr><tr><td>64</td>
-<td>16×n</td>
-<td>offset table</td>
-</tr><tr><td>64 + align64(16×n)</td>
-<td></td>
-<td>packed string bytes</td>
+<td>str_data_size</td>
+<td>the string block</td>
 </tr><tr><td>64 + str_data_size</td>
 <td></td>
 <td>serialized attributes (if <code>attrs_size</code> &gt; 0)</td>
-</tr></tbody></table><p>Offset-table entry (16 bytes): <code>str_offset(int64, relative to packed area) + str_length(int32, &lt; 0 = NA) + str_encoding(int32, cetype_t: 0=native, 1=UTF-8, 2=Latin-1, 3=bytes)</code>. The same layout is inlined for STRSXP elements in MORL regions (table at the element’s <code>data_offset</code>; element attrs use the directory entry’s <code>attrs_size</code>).</p>
+</tr></tbody></table><p>The string block (also the form of a STRSXP element in MORL regions, at the entry’s <code>data_offset</code>; element attrs use the directory entry’s <code>attrs_size</code>): four sections, each 64-byte aligned from the block start — <strong>validity bitmap</strong> (ceil(n/8) bytes, LSB first: 1 = present, 0 = NA), <strong>offsets</strong> ((n+1) int64; <code>offsets[0]</code> = 0, non-decreasing; string i is <code>data[offsets[i], offsets[i+1])</code>, an NA spans zero bytes), <strong>encoding</strong> (n bytes; cetype_t: 0=native, 1=UTF-8, 2=Latin-1, 3=bytes), then the <strong>packed string bytes</strong> (no terminators). The first, second and fourth are Arrow large_utf8’s three buffers verbatim; the encoding section is R’s per-CHARSXP mark. Section offsets come from one geometry function (<code>mori_mors_geometry</code> in mori_region.h, wrapped by <code>mori_str_geometry</code> in mori.h). The block carries its own validity bitmap — MORS headers have no [40-55] section.</p>
 </div>
 <div class="section level2">
 <h2 id="internal-state-and-lifetime">Internal State and Lifetime<a class="anchor" aria-label="anchor" href="#internal-state-and-lifetime"></a></h2>
@@ -237,7 +262,7 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <li>
 <strong><code>mori_host_tag</code></strong> — host-only unlink extptr from <code>mori_make_result</code>; addr <code>mori_shm *</code> (name on POSIX, HANDLE on Windows); finalizer <code>shm_unlink</code>/<code>CloseHandle</code>, skipped when creator <code>pid</code> ≠ <code>getpid()</code> (fork guard). Chained above the shm extptr.</li>
 <li>
-<strong><code>mori_owned_tag</code></strong> — every malloc-backed extptr: ALTREP data1 (view/vec/str) and bare path-walk intermediates (<code>mori_make_view_extptr</code>, always <code>mori_list_view *</code>). Addr type at the ALTREP boundary from <code>TYPEOF(x)</code>: <code>VECSXP → mori_list_view *</code>, <code>STRSXP → mori_str *</code>, else <code>mori_vec *</code>. <code>index</code> field: -1 standalone/root, &gt;= 0 element. Finalizer <code>mori_owned_finalizer</code>: release hook once, then <code>free</code>.</li>
+<strong><code>mori_owned_tag</code></strong> — every malloc-backed extptr: ALTREP data1 (view/vec/str) and bare path-walk intermediates (<code>mori_make_extptr</code>, always <code>mori_list_view *</code>). Addr type at the ALTREP boundary from <code>TYPEOF(x)</code>: <code>VECSXP → mori_list_view *</code>, <code>STRSXP → mori_str *</code>, else <code>mori_vec *</code>. <code>index</code> field: -1 standalone/root, &gt;= 0 element. Finalizer <code>mori_owned_finalizer</code>: release hook once, then <code>free</code>.</li>
 </ul><p><strong>Release hook</strong>: every owned struct embeds <code>mori_owned</code> (<code>release</code> + <code>release_arg</code>) as its first member, so the finalizer recovers it from any addr. Fires exactly once (<code>mori_release_once</code>’s NULL store) — at COW materialization or the finalizer, whichever first; internal callers pass NULL. ALTLIST views fire at the finalizer only: extracted elements keep referencing the region.</p>
 <p><code><a href="reference/is_shared.html">is_shared()</a></code> = <code>mori_view_check</code> (ALTREP with <code>mori_owned_tag</code> data1). <code>mori_shm_name()</code> = <code>mori_format_chain</code> (bare prefix for roots, path form for sub-objects).</p>
 <div class="section level3">
@@ -245,21 +270,26 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 <ul><li>
 <strong>Host</strong>: <code>mori_shm_create</code> mmaps (POSIX fd closed after mmap); <code>mori_make_result</code> splits ownership — ALTREP gets the mapping (<code>mori_shm_tag</code> extptr), the host unlink extptr is chained as its <code>prot</code>. Both finalizers run at GC; <code>R_RegisterCFinalizerEx(..., TRUE)</code> covers session exit.</li>
 <li>
-<strong>Consumer</strong>: <code>mori_shm_open</code> maps read-only (never unlinks). Prefix-opened lists: shm extptr → root view extptr (index -1) → data1; <code>Elt</code> sub-lists chain through parent views. Path-form: intermediates are bare extptrs, only the leaf gets an ALTLIST. Element vec/str extptrs’ <code>prot</code> is the parent view (shm extptr at root).</li>
+<strong>Consumer</strong>: <code>mori_shm_open</code> maps read-only (never unlinks). Prefix-opened lists: shm extptr → root view extptr (index -1) → data1; <code>Elt</code> sub-lists chain through parent views. Path-form: intermediates are bare extptrs, only the leaf gets an ALTLIST. Element vec/str extptrs’ <code>prot</code> is the parent view (shm extptr at root). The resolve paths (<code>map_shared</code>, the ALTREP Unserialize methods) dedupe consumer mappings through a process-global name-keyed LRU cache (<code>MORI_CACHE_MAX</code> = 16 slots, the vendored <code>mori_open_consumer</code>; eviction drops the cache’s reference, never unmaps under a live view): repeated opens of one region share one mapping, which then lives until cache eviction + the last view over it is GC’d, and stays read-only (a write attempt COWs). Caveat: an unlinked name still resolves while cached (stale-but-valid pages instead of “not found”) — this softens <code><a href="reference/prune_shared.html">prune_shared()</a></code> finality until eviction.</li>
 <li>
 <strong>Lifetime</strong>: leaves pin the root SHM through the chain (leaf → views → shm → host); every <code>R_MakeExternalPtr</code> retains its <code>prot</code>, so the chain survives GC of enclosing ALTLISTs. <code>mori_format_chain</code> is the only chain walker (<code>mori_owned_tag</code> hops, always <code>mori_list_view *</code>).</li>
 </ul></div>
 </div>
 <div class="section level2">
 <h2 id="code-organization">Code Organization<a class="anchor" aria-label="anchor" href="#code-organization"></a></h2>
+<p>The view layer (<code>src/mori.h</code>, <code>src/altrep.c</code>, <code>src/serialize.c</code>) is vendored from mizu and the region layer (<code>src/shm.c</code>, <code>src/err_tls.c</code>, <code>src/mori_region.h</code>) from libmizu, both by <code>tools/vendor.sh</code> — all generated, never edited here; the bullets describe the vendored content.</p>
 <ul><li>
-<strong>src/mori.h</strong> — types (<code>mori_shm</code> incl. creator <code>pid</code>, <code>mori_buf</code>, <code>mori_owned</code>, <code>mori_vec</code>, <code>mori_list_view</code>), embedder API declarations, constants (<code>MORI_MAGIC_*</code>, <code>MORI_HEADER_SIZE</code>, <code>MORI_TAG_*</code>, grammar bounds, <code>MORI_PREFIX_LITERAL</code>), <code>MORI_ALIGN64</code>, <code>mori_sizeof_elt</code>.</li>
+<strong>src/mori.h</strong> — types (<code>mori_shm</code> incl. creator <code>pid</code>, <code>mori_buf</code>, <code>mori_owned</code>, <code>mori_vec</code>, <code>mori_list_view</code>, <code>mori_str_geom</code>), embedder API declarations (incl. <code>mori_set_open_hook</code> / <code>mori_set_attrs_hooks</code> / <code>mori_set_wire_hooks</code>, <code>mori_resolve_id</code>, <code>mori_release_now</code> — mori itself registers none of the hooks), constants (<code>MORI_MAGIC_*</code>, <code>MORI_HEADER_SIZE</code>, <code>MORI_TAG_*</code>, grammar bounds, <code>MORI_PREFIX_LITERAL</code>, <code>MORI_CACHE_MAX</code>, <code>MORI_FLAGS_OFF</code>/<code>MORI_FLAG_S4</code>, <code>MORI_ELEM_S4</code>, <code>MORI_TYPE_INT64</code>), <code>MORI_ALIGN64</code>, <code>mori_sizeof_elt</code>, <code>mori_flags_known</code>, <code>mori_str_geometry</code>/<code>mori_str_valid</code> (wrapping the region header’s <code>mori_mors_geometry</code>).</li>
+<li>
+<strong>src/mori_region.h</strong> — assembled from carved libmizu sections: status/error enums, region magics + header layout constants (incl. <code>MORI_HDR_FLAGS_OFF</code>/<code>MORI_HDR_FLAG_S4</code>, <code>MORI_HDR_VALID_OFF</code>/<code>MORI_HDR_VALID_COUNT</code>), wire type tags (<code>mori_type_e</code>, <code>MORI_TYPE_INT64</code>) and NA sentinels, binding-tier constants (<code>MORI_ZC_FLOOR</code>, <code>MORI_OPEN_CACHE_MAX</code>, <code>MORI_INTEROP_MAGIC</code>, the language/capability registries), the <code>mori_shm</code> struct + region API decls, and the carved layout helpers the view layer delegates to (<code>mori_mors_geometry</code>, <code>mori_morh_validity_set</code>, <code>mori_na_build</code>, and the bounds-checked MIZL directory-entry reader <code>mori_morl_elem</code> with its <code>mori_morl_entry</code> struct and <code>mori_ext_morl_ent</code> / <code>mori_ext_morl_tag_ok</code> / <code>mori_ext_valid_ok</code> / <code>mori_ext_flags_known</code> / <code>mori_type_elt_size</code> chain — <code>MORI_EXT_INLINE</code> static inlines over <code>MORI_REGION_ALIGN64</code> arithmetic).</li>
 <li>
 <strong>src/shm.c</strong> — platform SHM create/open/close + finalizers. <code>mori_shm_reap</code> enumerates the platform name source (<code>/dev/shm</code> on Linux; per-user registry dir on macOS — see Platform Notes), classifies by embedded PID (<code>mori_pid_alive</code>), feeds <code>mori_reap_unlink</code>; a dead-PID region is reported removed only when <code>shm_unlink</code> actually reclaimed it (concurrent reaps never double-report). Windows / other POSIX can’t reap. <code>mori_shm_os_unlink</code> is the single unlink seam. Errors: <code>mori_err_classify</code> maps native errno/GetLastError → <code>MORI_E*</code> <strong>before</strong> any close/unlink clobbers it; <code>mori_err_describe</code> → summary + remediation hint.</li>
 <li>
-<strong>src/serialize.c</strong> — <code>mori_serialize_count</code> / <code>mori_serialize_into</code> / <code>mori_unserialize_from</code>: fallback MORL entries (<code>sexptype == 0</code>) and attributes.</li>
+<strong>src/err_tls.c</strong> — the thread-local error slot behind <code>mori_last_error_category</code> / <code>mori_last_error_message</code> for handle-free entry points (regions, prune).</li>
 <li>
-<strong>src/altrep.c</strong> — everything else: ALTREP classes, <code>mori_create</code>, layout dispatchers + size/write pairs, wrap constructors, consumer open+wrap, path walk, identifier formatter/parser, serialization + wire hooks, <code>mori_altrep_init</code>. Create failures: <code>mori_shm_create_failed</code> composes size (<code>mori_format_bytes</code>) + <code>mori_err_describe</code> into one <code>Rf_error</code>.</li>
+<strong>src/serialize.c</strong> — <code>mori_serialize_count</code> / <code>mori_serialize_into</code> / <code>mori_unserialize_from</code>: fallback MORL entries (<code>sexptype == 0</code>) and (unless the attrs hooks take them) attributes.</li>
+<li>
+<strong>src/altrep.c</strong> — everything else: ALTREP classes, <code>mori_create</code>, layout dispatchers + size/write pairs (incl. the foreign staging mode: validity sections, <code>*_GET_REGION</code> copies of admitted ALTREP atomics, the integer64 leaf gate), wrap constructors, consumer open+wrap, <code>mori_resolve_id</code> + path walk, identifier formatter/parser, serialization + wire hooks, <code>mori_altrep_init</code>. Create failures: <code>mori_shm_create_failed</code> composes size (<code>mori_format_bytes</code>) + <code>mori_err_describe</code> into one <code>Rf_error</code>.</li>
 <li>
 <strong>src/init.c</strong> — <code>R_init_mori</code>; 5 <code>.Call</code> entries (names match C functions; all take one <code>SEXP</code> except <code>mori_prune</code>).</li>
 <li>
@@ -267,14 +297,14 @@ int1       ::= [1-9][0-9]*       # 1-based, no leading zeros</code></pre>
 </ul></div>
 <div class="section level2">
 <h2 id="testing">Testing<a class="anchor" aria-label="anchor" href="#testing"></a></h2>
-<p>testthat edition 3; <code>tests/testthat.R</code> entry point; <code>tests/testthat/test-*.R</code> grouped by topic. Nothing gated behind <code>skip_on_cran</code> or env vars.</p>
+<p>testthat edition 3; <code>tests/testthat.R</code> entry point; <code>tests/testthat/test-*.R</code> grouped by topic. Nothing gated behind <code>skip_on_cran</code> or env vars. <code>test-corruption.R</code> hand-crafts malformed regions byte-by-byte and is layout-sensitive by design — it must track the layouts above (directory entries 64-byte aligned; the string block in the Arrow-shaped form via its <code>str_block</code> helper). Those cases run only on Linux (file-backed <code>/dev/shm</code>), so macOS local runs skip them — CI’s Ubuntu jobs are the ones that exercise them.</p>
 </div>
 <div class="section level2">
 <h2 id="platform-notes">Platform Notes<a class="anchor" aria-label="anchor" href="#platform-notes"></a></h2>
 <ul><li>
 <strong>Linux</strong>: <code>/dev/shm</code> tmpfs via <code><a href="https://rdrr.io/r/base/connections.html" class="external-link">open()</a></code>/<code><a href="https://rdrr.io/r/base/unlink.html" class="external-link">unlink()</a></code> directly (avoids the <code>-lrt</code> dependency). <code>MAP_POPULATE</code> pre-faults.</li>
 <li>
-<strong>macOS</strong>: <code>shm_open</code>/<code>shm_unlink</code> (libc); <code>MAP_POPULATE</code> is a no-op. The kernel namespace can’t be enumerated (invisible once the creator dies), so reaping uses a per-user registry under <code>TMPDIR</code>: <strong>one append-only log per process</strong> (<code>&lt;dir&gt;/mori_&lt;pid&gt;</code>, not a file per region — one <code><a href="https://rdrr.io/r/base/write.html" class="external-link">write()</a></code> ~1 µs vs ~40 µs file creation), opened lazily on first share by <code>mori_log_append</code> (sole creator; retries through <code>mkdir</code> on <code>ENOENT</code>). Single-writer ⇒ no locking; readers are reapers of dead PIDs. <code>mori_log_release</code> tracks a live-region count; at zero it unlinks the log and <code>rmdir</code>s the dir. The count is incremented even when logging fails (forfeits reapability, never the region). Fork-safe via <code>mori_log_fork_guard</code> (reopens on PID change). A <code><a href="https://rdrr.io/r/base/write.html" class="external-link">write()</a></code> is cross-process visible without <code>fsync</code>, lost only on reboot. All log ops best-effort.</li>
+<strong>macOS</strong>: <code>shm_open</code>/<code>shm_unlink</code> (libc); <code>MAP_POPULATE</code> is a no-op. The kernel namespace can’t be enumerated (invisible once the creator dies), so reaping uses a per-user registry under <code>TMPDIR</code>: <strong>one append-only log per process</strong> (<code>&lt;dir&gt;/mori_&lt;pid&gt;</code>, not a file per region): each created region recorded as one 4-byte binary record holding its name counter (the pid comes from the filename) — one <code><a href="https://rdrr.io/r/base/write.html" class="external-link">write()</a></code> ~1 µs vs ~40 µs file creation, opened lazily on first share by <code>mori_log_append</code> (sole creator; retries through <code>mkdir</code> on <code>ENOENT</code>). Single-writer ⇒ no locking; readers are reapers of dead PIDs. <code>mori_log_release</code> tracks a live-region count; at zero it unlinks the log and <code>rmdir</code>s the dir. The count is incremented even when logging fails (forfeits reapability, never the region). Fork-safe via <code>mori_log_fork_guard</code> (reopens on PID change). A <code><a href="https://rdrr.io/r/base/write.html" class="external-link">write()</a></code> is cross-process visible without <code>fsync</code>, lost only on reboot. All log ops best-effort.</li>
 <li>
 <strong>Windows</strong>: page-file-backed <code>CreateFileMappingA</code>/<code>MapViewOfFile</code>. The host must keep the mapping handle alive until consumers open it (the GC-chained host extptr does).</li>
 </ul></div>
