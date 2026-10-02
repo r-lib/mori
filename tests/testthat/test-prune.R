@@ -147,8 +147,9 @@ test_that("share() recreates the registry directory on demand", {
   expect_true(dir.exists(dir))
 
   log <- file.path(dir, sprintf("mori_%x", Sys.getpid()))
-  expect_true(file.exists(log)) # this process's registry log
-  expect_true(nm %in% readLines(log)) # the region is recorded for pruning
+  expect_true(file.exists(log))               # this process's registry log
+  recs <- readBin(log, "integer", n = file.size(log) / 4)  # 4-byte counter records
+  expect_true(sub(".*_", "", nm) %in% sprintf("%x", recs))  # recorded for pruning
 
   rm(x)
   gc()
