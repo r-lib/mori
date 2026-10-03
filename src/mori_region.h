@@ -1,6 +1,6 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: 1efb8839b7c0ffef614edeeb398a2f27b36f9518 (commit 1efb8839b7c0ffef614edeeb398a2f27b36f9518, 2026-10-01T22:57:14+01:00)
+   Ref: 909563b2f1c9f8a46f6b8ca243fb94408c0237c5 (commit 909563b2f1c9f8a46f6b8ca243fb94408c0237c5, 2026-10-03T22:48:29+01:00)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
@@ -18,6 +18,14 @@
 
 /* Vendored static build: no export decoration. */
 #define MORI_API
+
+/* Some carved static inlines go unused in some TUs; keep them quiet.
+   (Upstream defines this annotation above the carve boundary.) */
+#if defined(__GNUC__) || defined(__clang__)
+#  define MORI_MAYBE_UNUSED __attribute__((unused))
+#else
+#  define MORI_MAYBE_UNUSED
+#endif
 
 typedef struct mori_shm_s mori_shm;
 
@@ -551,6 +559,17 @@ mori_shm *mori_shm_open_heap(const char *name);
 /* Unmaps only (never frees the struct); unlink != 0 also removes the
    name. The public mori_shm_close wraps this + free. */
 void mori_shm_close_stack(mori_shm *shm, int unlink);
+
+/* The open forms' name copy: fixed-buffer truncate, always
+   NUL-terminated, length stamped. */
+static inline MORI_MAYBE_UNUSED void mori_shm_set_name(mori_shm *shm,
+                                                      const char *name) {
+  size_t nl = strlen(name);
+  if (nl >= sizeof(shm->name)) nl = sizeof(shm->name) - 1;
+  memcpy(shm->name, name, nl);
+  shm->name[nl] = '\0';
+  shm->name_len = (uint8_t) nl;
+}
 
 /* macOS registry-log exit/unload hook (shm.c; defined under __APPLE__
    only): removes this process's log and prunes the registry dir once

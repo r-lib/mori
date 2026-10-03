@@ -31,8 +31,8 @@
 
 set -euo pipefail
 
-MIZU_PIN="901f2e6cbedc55507fb69572ed11b988750e47c3"    # mizu: Bump the libmizu vendor pin to the F2 remote-leaf wire contract
-LIBMIZU_PIN="1efb8839b7c0ffef614edeeb398a2f27b36f9518" # libmizu: Add the MIZL remote leaf (directory tag 33) wire contract
+MIZU_PIN="65e56b406f6b16f1ba980f1b860f6cdc08e2aed7"    # mizu: Record the 2026-10-03 bench A/B and re-baseline outcomes
+LIBMIZU_PIN="909563b2f1c9f8a46f6b8ca243fb94408c0237c5" # libmizu: Deduplicate shared core helpers and add the channel fork guard
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/src"
@@ -161,6 +161,14 @@ if [ "$do_region" -eq 1 ]; then
 
 /* Vendored static build: no export decoration. */
 #define MORI_API
+
+/* Some carved static inlines go unused in some TUs; keep them quiet.
+   (Upstream defines this annotation above the carve boundary.) */
+#if defined(__GNUC__) || defined(__clang__)
+#  define MORI_MAYBE_UNUSED __attribute__((unused))
+#else
+#  define MORI_MAYBE_UNUSED
+#endif
 
 typedef struct mori_shm_s mori_shm;
 

@@ -108,11 +108,7 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
   shm->addr = NULL;
   shm->size = 0;
   shm->handle = NULL;
-  size_t nl = strlen(name);
-  if (nl >= sizeof(shm->name)) nl = sizeof(shm->name) - 1;
-  memcpy(shm->name, name, nl);
-  shm->name[nl] = '\0';
-  shm->name_len = (uint8_t) nl;
+  mori_shm_set_name(shm, name);
   shm->pid = 0;                      /* consumer: never the creator */
 
   HANDLE h = OpenFileMappingA(FILE_MAP_READ, FALSE, name);
@@ -591,11 +587,7 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
 
   shm->addr = NULL;
   shm->size = 0;
-  size_t nl = strlen(name);
-  if (nl >= sizeof(shm->name)) nl = sizeof(shm->name) - 1;
-  memcpy(shm->name, name, nl);
-  shm->name[nl] = '\0';
-  shm->name_len = (uint8_t) nl;
+  mori_shm_set_name(shm, name);
   shm->pid = 0;                      /* consumer: never the creator */
 
   int fd = mori_shm_os_open(name, O_RDONLY, 0);
