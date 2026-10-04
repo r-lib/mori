@@ -1059,7 +1059,16 @@ static size_t mori_string_data_size(SEXP x) {
 
 // Recursive size/write helpers for nested list regions -----------------------
 
-static size_t mori_nested_size(SEXP x, int *ok, int foreign);
+/* The pre-measured string-leaf sums' cursor (mori_layout_size_sums):
+   one consumption per STRSXP leaf, in the tree's pre-order. NULL walks
+   the leaves itself. */
+typedef struct {
+  const size_t *p;
+  size_t left;
+} mori_sump;
+
+static size_t mori_nested_size(SEXP x, int *ok, int foreign,
+                                    mori_sump *sp);
 static int mori_na_present(int type, const void *src, uint64_t n);
 static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign);
 /* The remote-leaf (tag 33) writer's descriptor helpers, defined with the
@@ -1081,8 +1090,12 @@ static int mori_ref_descriptor(SEXP elt, SEXP id, int64_t *length,
    identity (a compact 1:1e8 becomes an 800 MB memcpy). R's S4 data-part
    wrappers forward to their materialized data part and are accepted. The
    foreign mode relaxes this: the foreign filter has already vetted the
-   tree, and the write copies any atomic ALTREP through *_GET_REGION. */
-static size_t mori_nested_size(SEXP x, int *ok, int foreign) {
+   tree, and the write copies any atomic ALTREP through *_GET_REGION. sp,
+   when non-NULL, supplies each STRSXP leaf's body size in place of the
+   leaf's own walk; a shortfall is a recording bug and rejects like a
+   veto. */
+static size_t mori_nested_size(SEXP x, int *ok, int foreign,
+                                    mori_sump *sp) {
 
   R_xlen_t n = XLENGTH(x);
   size_t total = MORI_ALIGN64(MORI_HEADER_SIZE + 32 * (size_t) n);
@@ -1120,16 +1133,25 @@ static size_t mori_nested_size(SEXP x, int *ok, int foreign) {
     } else if (type == VECSXP || (type == LISTSXP && !Rf_isS4(elt))) {
       SEXP coerced = (type == LISTSXP) ? Rf_coerceVector(elt, VECSXP) : elt;
       PROTECT(coerced);
-      elt_size = mori_nested_size(coerced, ok, foreign);
+      elt_size = mori_nested_size(coerced, ok, foreign, sp);
       UNPROTECT(1);
       if (ok != NULL && !*ok) return 0;
     } else if (mori_shm_eligible(type)) {
       /* the integer64 leaf gate: the directory tag carries the class, no
          blob (mizh's root treatment — the write gates identically) */
       int int64 = type != STRSXP && mori_is_int64_any(elt);
-      size_t raw_size = (type == STRSXP) ?
-        mori_string_data_size(elt) :
-        (size_t) XLENGTH(elt) * mori_sizeof_elt(type);
+      size_t raw_size;
+      if (type == STRSXP) {
+        if (sp != NULL) {
+          if (sp->left == 0) { if (ok != NULL) *ok = 0; return 0; }
+          raw_size = *sp->p++;
+          sp->left--;
+        } else {
+          raw_size = mori_string_data_size(elt);
+        }
+      } else {
+        raw_size = (size_t) XLENGTH(elt) * mori_sizeof_elt(type);
+      }
       SEXP elt_attrs = PROTECT(mori_get_attrs_for_serialize(elt));
       size_t attrs_size = 0;
       if (elt_attrs != R_NilValue && !int64)
@@ -1588,7 +1610,8 @@ static void mors_write(unsigned char *base, SEXP x, int foreign) {
    staging mode relaxes the ALTREP rejection (the write copies through
    *_GET_REGION). Non-layoutable types also return 0 — never ambiguous:
    every region opens with a 64-byte header. */
-static size_t mori_layout_size_impl(SEXP x, int *ok, int foreign) {
+static size_t mori_layout_size_impl(SEXP x, int *ok, int foreign,
+                                         mori_sump *sp) {
   if (ok != NULL && !foreign) {
     if (ALTREP(x) && !mori_view_check(x) && !mori_altrep_readable(x)) {
       *ok = 0; return 0;
@@ -1603,7 +1626,7 @@ static size_t mori_layout_size_impl(SEXP x, int *ok, int foreign) {
     } else {
       PROTECT(x);
     }
-    size_t total = mori_nested_size(x, ok, foreign);
+    size_t total = mori_nested_size(x, ok, foreign, sp);
     UNPROTECT(1);
     return total;
   }
@@ -1614,7 +1637,20 @@ static size_t mori_layout_size_impl(SEXP x, int *ok, int foreign) {
 
 size_t mori_layout_size(SEXP x, int foreign) {
   int ok = 1;
-  return mori_layout_size_impl(x, &ok, foreign);
+  return mori_layout_size_impl(x, &ok, foreign, NULL);
+}
+
+/* The presized variant (mori.h): the string leaves' body sums arrive
+   pre-measured in pre-order. A count mismatch — shortfall inside the
+   walk or a leftover here — is a recording bug: 0, as a veto returns, so
+   the caller's mori_layout_size fallback covers both. */
+size_t mori_layout_size_sums(SEXP x, int foreign, const size_t *sums,
+                                  size_t nsums) {
+  int ok = 1;
+  mori_sump sp = { sums, nsums };
+  size_t total = mori_layout_size_impl(x, &ok, foreign, &sp);
+  if (total == 0 || sp.left != 0) return 0;
+  return total;
 }
 
 size_t mori_layout_write(unsigned char *base, SEXP x, int foreign) {
@@ -1648,7 +1684,7 @@ size_t mori_layout_write(unsigned char *base, SEXP x, int foreign) {
 SEXP mori_create(SEXP x) {
   if (mori_view_check(x)) return x;
 
-  size_t total = mori_layout_size_impl(x, NULL, 0);
+  size_t total = mori_layout_size_impl(x, NULL, 0, NULL);
   if (total == 0) return x;
 
   mori_shm *shm;

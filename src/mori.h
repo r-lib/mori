@@ -184,6 +184,17 @@ void mori_restore_attrs(SEXP result, unsigned char *buf, size_t size);
    after each atomic node's copy, returning the actual bytes used. */
 size_t mori_layout_size(SEXP x, int foreign);
 size_t mori_layout_write(unsigned char *base, SEXP x, int foreign);
+/* The size pass with the string leaves pre-measured: sums carries every
+   STRSXP leaf's body size (the mori_string_data_size the pass would
+   compute) in the tree's pre-order, letting an eligibility walk that
+   already visited the leaves retire this pass's string walks. One sum is
+   consumed per string leaf; a count that runs out or has leftovers is a
+   recording bug — the return is 0, indistinguishable from a veto, so the
+   caller simply falls back to mori_layout_size. The walk's own
+   business (attrs blobs, serialized leaves, the validity reserve) is
+   unchanged. */
+size_t mori_layout_size_sums(SEXP x, int foreign, const size_t *sums,
+                                  size_t nsums);
 
 /* View introspection: C-level is_shared, the identifier formatter, the
    identifier parser, and a path walk over an already-open region (keeper
