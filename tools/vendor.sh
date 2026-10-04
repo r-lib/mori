@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-MIZU_PIN="65e56b406f6b16f1ba980f1b860f6cdc08e2aed7"    # mizu: Record the 2026-10-03 bench A/B and re-baseline outcomes
+MIZU_PIN="635df0c1cfe5e32c262faedcd55ad938cb24b98f"    # mizu: Streamline the MIZS string stage: fused walks, bulk foreign fills, frame-column gate
 LIBMIZU_PIN="909563b2f1c9f8a46f6b8ca243fb94408c0237c5" # libmizu: Deduplicate shared core helpers and add the channel fork guard
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"

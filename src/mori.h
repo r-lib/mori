@@ -302,4 +302,22 @@ static inline int mori_str_valid(const unsigned char *validity, size_t i) {
   return (validity[i >> 3] >> (i & 7)) & 1;
 }
 
+/* One-call element base for the string walks: STRING_PTR_RO (R >= 4.5)
+   instead of a STRING_ELT call per element. An ALTREP input gets NULL
+   and keeps STRING_ELT — a data-pointer request on a view could
+   materialize it. */
+static inline const SEXP *mori_str_base(SEXP x) {
+#if R_VERSION >= R_Version(4, 5, 0)
+  if (!ALTREP(x)) return STRING_PTR_RO(x);
+#else
+  (void) x;
+#endif
+  return NULL;
+}
+
+static inline SEXP mori_str_elt(SEXP x, R_xlen_t i,
+                                     const SEXP *base) {
+  return base != NULL ? base[i] : STRING_ELT(x, i);
+}
+
 #endif /* MORI_H */

@@ -1001,32 +1001,43 @@ static SEXP mori_open_consumer(const char *name) {
 // String write helper (shared by standalone and list paths) -------------------
 
 /* Writes the string block for x at dest (mori.h documents the form).
-   Returns total bytes written (including alignment padding). */
-static size_t mori_write_strings(unsigned char *dest, SEXP x) {
+   Returns total bytes written (including alignment padding). Every
+   section is written in full — validity starts all-present with NA bits
+   cleared in the loop, offsets one running store per element (the
+   geometry 64-byte aligns the section, so the cast is safe), encoding
+   one bulk fill on the foreign path (the gate has already excluded
+   latin1/bytes; UTF-8 marks and validated ASCII both read correctly as
+   UTF-8, and the foreign reader skips its native-mark validation
+   defense) against per-element marks same-language (the wire contract
+   pins them) — the inter-section alignment gaps are never written and
+   carry nothing a reader consults (every access is geometry-keyed). */
+static size_t mori_write_strings(unsigned char *dest, SEXP x,
+                                      int foreign) {
   R_xlen_t n = XLENGTH(x);
   mori_str_geom g = mori_str_geometry((size_t) n);
   unsigned char *validity = dest + g.validity;
-  unsigned char *offsets = dest + g.offsets;
+  int64_t *offsets = (int64_t *) (dest + g.offsets);
   unsigned char *encoding = dest + g.encoding;
   unsigned char *data = dest + g.data;
 
-  /* Everything ahead of the string bytes starts zeroed: a clear validity
-     bit and a zero encoding byte are the NA form, and the alignment gaps
-     carry nothing an embedder's region reuse could leave stale. The
-     offsets are then written in full (offsets[0] is the zero). */
-  memset(dest, 0, g.data);
+  memset(validity, 0xFF, ((size_t) n + 7) / 8);
+  if (foreign) memset(encoding, CE_UTF8, (size_t) n);
+  offsets[0] = 0;
 
+  const SEXP *elts = mori_str_base(x);
   int64_t cur = 0;
   for (R_xlen_t i = 0; i < n; i++) {
-    SEXP elt = STRING_ELT(x, i);
-    if (elt != NA_STRING) {
+    SEXP elt = mori_str_elt(x, i, elts);
+    if (elt == NA_STRING) {
+      validity[i >> 3] &= (unsigned char) ~(1u << (i & 7));
+      encoding[i] = 0;
+    } else {
       size_t slen = (size_t) LENGTH(elt);
       memcpy(data + cur, CHAR(elt), slen);
       cur += (int64_t) slen;
-      validity[i >> 3] |= (unsigned char) (1u << (i & 7));
-      encoding[i] = (unsigned char) Rf_getCharCE(elt);
+      if (!foreign) encoding[i] = (unsigned char) Rf_getCharCE(elt);
     }
-    memcpy(offsets + 8 * ((size_t) i + 1), &cur, 8);
+    offsets[i + 1] = cur;
   }
 
   return g.data + (size_t) cur;
@@ -1034,9 +1045,10 @@ static size_t mori_write_strings(unsigned char *dest, SEXP x) {
 
 static size_t mori_string_data_size(SEXP x) {
   R_xlen_t n = XLENGTH(x);
+  const SEXP *base = mori_str_base(x);
   size_t str_bytes = 0;
   for (R_xlen_t i = 0; i < n; i++) {
-    SEXP elt = STRING_ELT(x, i);
+    SEXP elt = mori_str_elt(x, i, base);
     if (elt != NA_STRING)
       str_bytes += (size_t) LENGTH(elt);
   }
@@ -1211,7 +1223,7 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
       size_t raw_size, attrs_size = 0;
 
       if (type == STRSXP) {
-        raw_size = mori_write_strings(base + cur, elt);
+        raw_size = mori_write_strings(base + cur, elt, foreign);
       } else {
         raw_size = (size_t) XLENGTH(elt) * mori_sizeof_elt(type);
         if (ALTREP(elt) && DATAPTR_OR_NULL(elt) == NULL) {
@@ -1539,12 +1551,13 @@ static size_t mors_size(SEXP x) {
    block write reports its exact size, so no separate sizing walk;
    header fields are written last, once both sizes are known. The string
    block carries its own validity bitmap — no header section. */
-static void mors_write(unsigned char *base, SEXP x) {
+static void mors_write(unsigned char *base, SEXP x, int foreign) {
 
   R_xlen_t n = XLENGTH(x);
 
   memset(base, 0, MORI_HEADER_SIZE);
-  size_t str_size = mori_write_strings(base + MORI_HEADER_SIZE, x);
+  size_t str_size = mori_write_strings(base + MORI_HEADER_SIZE, x,
+                                            foreign);
 
   SEXP attrs = PROTECT(mori_get_attrs_for_serialize(x));
   size_t attrs_size = 0;
@@ -1617,7 +1630,7 @@ size_t mori_layout_write(unsigned char *base, SEXP x, int foreign) {
     return total;
   }
   if (type == STRSXP) {
-    mors_write(base, x);
+    mors_write(base, x, foreign);
     int32_t as32;
     int64_t sd;
     memcpy(&as32, base + 4, 4);
