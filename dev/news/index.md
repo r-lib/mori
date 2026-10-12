@@ -20,6 +20,9 @@
   (e.g. [`parallel::mclapply`](https://rdrr.io/r/parallel/mclapply.html))
   unlinking the parent’s live region when garbage-collecting an
   inherited shared object.
+- Fixed [`share()`](https://mori.r-lib.org/dev/reference/share.md)
+  leaking its shared memory region when the write failed partway
+  (e.g. on allocation error).
 - Corrupted regions now raise a clean R error on
   [`map_shared()`](https://mori.r-lib.org/dev/reference/map_shared.md)
   or access instead of reading out of bounds or crashing R.

@@ -1,8 +1,5 @@
 # mori
 
-[![Ask
-DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/r-lib/mori)
-
 Shared Memory for R Objects
 
 → [`share()`](https://mori.r-lib.org/dev/reference/share.md) writes an R

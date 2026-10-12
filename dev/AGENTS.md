@@ -348,14 +348,16 @@ leaf (the tag carries the class — no attrs blob); `33` → remote leaf
 identifier — name with optional index path, 1-255 bytes — resolved by
 reference through the consumer open + path walk, with the entry’s
 length/attrs/NA claims cross-checked against the referenced region;
-read-side only, no mori writer emits it, and the S4 bit is never set);
-other → raw zero-copy data, with bit 30 of `sexptype` (`MORI_ELEM_S4`)
-flagging an S4 leaf (masked off at read). Non-VECSXP attrs sit at
-`data_offset + data_size - attrs_size`. The foreign-mode validity tail:
-one LSB-first bitmap per NA-capable atomic leaf (1 = present, spent only
-where NAs are present), then an n-entry table of {i64 offset, i64 null
-count} pairs the header’s validity words point at; a VECSXP/STRSXP
-leaf’s pair is {0,0} (the nested header / string block carries its own).
+`mori_nested_write` emits it when a list being shared holds an
+already-shared, attribute-free view as an element (`mori_refable`), and
+the S4 bit is never set); other → raw zero-copy data, with bit 30 of
+`sexptype` (`MORI_ELEM_S4`) flagging an S4 leaf (masked off at read).
+Non-VECSXP attrs sit at `data_offset + data_size - attrs_size`. The
+foreign-mode validity tail: one LSB-first bitmap per NA-capable atomic
+leaf (1 = present, spent only where NAs are present), then an n-entry
+table of {i64 offset, i64 null count} pairs the header’s validity words
+point at; a VECSXP/STRSXP leaf’s pair is {0,0} (the nested header /
+string block carries its own).
 
 **MORS — ALTSTRING.** Header + string block + optional trailing attrs.
 
