@@ -1,6 +1,6 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: 909563b2f1c9f8a46f6b8ca243fb94408c0237c5 (commit 909563b2f1c9f8a46f6b8ca243fb94408c0237c5, 2026-10-03T22:48:29+01:00)
+   Ref: 6b09c9f35b33630f217ea2fc0103bb016449d524 (commit 6b09c9f35b33630f217ea2fc0103bb016449d524, 2026-10-12T17:16:48+01:00)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region

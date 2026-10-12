@@ -122,8 +122,8 @@ test_that("shared_name carries a bracketed path for root and sub-lists alike", {
   x <- share(list(outer = list(a = 1:5)))
   nm <- shared_name(x)
   expect_true(nzchar(nm))
-  expect_identical(shared_name(x$outer),    paste0(nm, "[1]"))
-  expect_identical(shared_name(x$outer$a),  paste0(nm, "[1,1]"))
+  expect_identical(shared_name(x$outer), paste0(nm, "[1]"))
+  expect_identical(shared_name(x$outer$a), paste0(nm, "[1,1]"))
 })
 
 test_that("deeply nested structure (3 list levels) round-trips", {
@@ -202,4 +202,80 @@ test_that("sub-list reference alone keeps root SHM alive through GC", {
   expect_identical(y$outer$a[], 1:10)
   expect_identical(sub$a[], 1:10)
   expect_identical(sub$b, letters)
+})
+
+test_that("an already-shared element crosses by reference (remote leaf)", {
+  v <- share(1:100)
+  s <- share(c("alpha", "beta"))
+  x <- share(list(v = v, s = s, plain = 1:5))
+  y <- map_shared(shared_name(x))
+  expect_true(is_shared(y$v))
+  expect_true(is_shared(y$s))
+  expect_identical(shared_name(y$v), shared_name(v))
+  expect_identical(shared_name(y$s), shared_name(s))
+  expect_identical(y$v[], 1:100)
+  expect_identical(y$s, c("alpha", "beta"))
+  expect_identical(y$plain[], 1:5)
+})
+
+test_that("an already-shared list crosses by reference (remote leaf)", {
+  s <- share(list(1:5, "x"))
+  x <- share(list(s = s, plain = 1:3))
+  y <- map_shared(shared_name(x))
+  expect_true(is_shared(y$s))
+  expect_identical(shared_name(y$s), shared_name(s))
+  expect_identical(y$s[[1]][], 1:5)
+  expect_identical(y$s[[2]], "x")
+})
+
+test_that("a shared sub-list view crosses by reference (path identifier)", {
+  x <- share(list(list(list(1:5))))
+  sub <- x[[1]][[1]]
+  y <- share(list(s = sub))
+  z <- map_shared(shared_name(y))
+  expect_true(is_shared(z$s))
+  expect_identical(shared_name(z$s), shared_name(sub))
+  expect_identical(z$s[[1]][], 1:5)
+})
+
+test_that("an over-deep view nested in a new share crosses by value", {
+  x <- 1:5
+  for (i in 1:66) {
+    x <- list(x)
+  }
+  v <- share(x)
+  for (i in 1:66) {
+    v <- v[[1]]
+  }
+  expect_true(is_shared(v))
+  y <- share(list(v = v))
+  z <- map_shared(shared_name(y))
+  expect_false(is_shared(z$v))
+  expect_identical(z$v, 1:5)
+})
+
+test_that("a remote leaf to an unlinked region errors on access", {
+  x <- local({
+    v <- share(1:100)
+    share(list(v = v))
+  })
+  gc()
+  y <- map_shared(shared_name(x))
+  expect_error(y$v, "referenced region not found")
+})
+
+test_that("a COW-materialized view nested in a new share crosses by value", {
+  v <- share(as.double(1:100))
+  cx <- share(complex(real = 1:4, imaginary = 5:8))
+  rw <- share(as.raw(1:10))
+  v[1] <- 99
+  cx[1] <- 0 + 0i
+  rw[1] <- as.raw(255L)
+  x <- share(list(v = v, cx = cx, rw = rw))
+  y <- map_shared(shared_name(x))
+  expect_true(is_shared(y$v))
+  expect_identical(y$v[1], 99)
+  expect_identical(y$v[2:4], c(2, 3, 4))
+  expect_identical(y$cx[], complex(real = c(0, 2:4), imaginary = c(0, 6:8)))
+  expect_identical(y$rw[], as.raw(c(255, 2:10)))
 })

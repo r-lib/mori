@@ -62,3 +62,16 @@ test_that("share round-trips a matrix through itself", {
   expect_identical(dim(m), dim(n))
   expect_identical(as.integer(m), as.integer(n))
 })
+
+test_that("class-only integer64 round-trips at root and nested", {
+  x <- structure(as.double(c(1, 2, 3)), class = "integer64")
+  sx <- share(x)
+  y <- map_shared(shared_name(sx))
+  expect_true(is_shared(y))
+  expect_identical(class(y), "integer64")
+  expect_identical(unclass(y[]), unclass(x))
+  l <- share(list(v = x))
+  z <- map_shared(shared_name(l))
+  expect_identical(class(z$v), "integer64")
+  expect_identical(unclass(z$v[]), unclass(x))
+})

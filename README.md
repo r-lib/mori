@@ -12,9 +12,6 @@ status](https://www.r-pkg.org/badges/version/mori)](https://CRAN.R-project.org/p
 coverage](https://codecov.io/gh/r-lib/mori/graph/badge.svg)](https://app.codecov.io/gh/r-lib/mori)
 <!-- badges: end -->
 
-[![Ask
-DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/r-lib/mori)
-
 Shared Memory for R Objects
 
 → `share()` writes an R object into shared memory and returns a shared

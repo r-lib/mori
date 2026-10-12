@@ -206,6 +206,23 @@ int mori_view_check(SEXP x);
    or COW-materialized view keeps the serialize path's wire hooks). */
 int mori_refable(SEXP x);
 SEXP mori_shm_name(SEXP x);
+/* The region mapping a view's keeper chain anchors at — the shm_tag
+   terminus. Borrowed (the view pins it); NULL on a malformed chain or a
+   finalized mapping. Callers gate on mori_view_check: the chain and the
+   identifier are the same truth, so addr/size match the parsed
+   identifier's region. */
+mori_shm *mori_chain_shm(SEXP x);
+/* The terminal directory entry of a path over an open region, and the MORL
+   base containing it: every hop re-validated (a VEC entry with attrs_size 0,
+   each span bounding the next read — a tag-33 hop fails the VEC check, so a
+   resolved chain's flattened path never meets one), the terminal read
+   through mori_morl_elem. 0 on success, -1 on any rejection; non-raising,
+   so the callers shape the error — the descriptor's corrupt-or-newer raise,
+   an embedder's decline. */
+int mori_path_entry(const unsigned char *base, int64_t region_size,
+                         const int32_t *path, int path_len,
+                         const unsigned char **leaf_base,
+                         mori_morl_entry *out);
 int mori_parse_id(const char *s, char *name_out, size_t name_out_size,
                   int32_t *path_out, int *path_len);
 SEXP mori_walk_path(unsigned char *base, int64_t region_size,

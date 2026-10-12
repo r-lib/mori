@@ -1202,16 +1202,23 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
     mori_elem entry;
     entry.data_offset = (int64_t) cur;
 
-    int is_remote = 0;
+    int is_remote = 0, broken_ref = 0;
     if (mori_refable(elt)) {
       SEXP id = PROTECT(mori_shm_name(elt));
       int64_t rlength = 0, rattrs = 0;
       int rna_free = 0;
-      if (id != R_NilValue &&
-          mori_ref_descriptor(elt, id, &rlength, &rattrs, &rna_free) == 0) {
+      if (id != R_NilValue) {
         /* the remote leaf (F2.5): the identifier span and the referenced
            column's own length / attrs size as resolved; the emit hook
-           marks the region REFHELD (the holder set widens) */
+           marks the region REFHELD (the holder set widens). The size pass
+           committed to the span when it counted the identifier, so a
+           descriptor that no longer resolves is an error, never a silent
+           downgrade to a copy (that would overrun the sized region) */
+        if (mori_ref_descriptor(elt, id, &rlength, &rattrs,
+                                     &rna_free) != 0) {
+          UNPROTECT(1);
+          Rf_error("mori: a view's identifier no longer resolves its region");
+        }
         size_t len = (size_t) LENGTH(STRING_ELT(id, 0));
         memcpy(base + cur, CHAR(STRING_ELT(id, 0)), len);
         entry.sexptype = MORI_TAG_REF;
@@ -1220,15 +1227,20 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
         entry.data_size = (int64_t) len;
         if (mori_emit_hook != NULL) mori_emit_hook(elt);
         is_remote = 1;
+      } else {
+        /* a broken identifier (an over-deep chain): the embedder probe
+           rejects these, so only the host path meets them — its size pass
+           counted the serialize form, and the serialize branch below
+           writes it */
+        broken_ref = 1;
       }
       UNPROTECT(1);
-      /* a broken identifier: the host path never meets it (the probe
-         rejects); the copy forms below take it */
     }
 
     if (is_remote) {
       cur += MORI_ALIGN64((size_t) entry.data_size);
-    } else if (type == VECSXP || (type == LISTSXP && !Rf_isS4(elt))) {
+    } else if (!broken_ref &&
+               (type == VECSXP || (type == LISTSXP && !Rf_isS4(elt)))) {
       SEXP coerced = (type == LISTSXP) ? Rf_coerceVector(elt, VECSXP) : elt;
       PROTECT(coerced);
       size_t written = mori_nested_write(base + cur, coerced, foreign);
@@ -1238,7 +1250,7 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
       entry.data_size = (int64_t) written;
       UNPROTECT(1);
       cur += MORI_ALIGN64(written);
-    } else if (mori_shm_eligible(type)) {
+    } else if (!broken_ref && mori_shm_eligible(type)) {
       /* the integer64 leaf gate (the size pass gates identically) */
       int int64 = type != STRSXP && mori_is_int64_any(elt);
       SEXP elt_attrs = PROTECT(mori_get_attrs_for_serialize(elt));
@@ -1681,6 +1693,25 @@ size_t mori_layout_write(unsigned char *base, SEXP x, int foreign) {
    dispatchers; a 0 size means pass-through. A LISTSXP root is coerced once
    per dispatcher — pairlist roots are rare enough to pay that for a single
    dispatch. */
+/* The layout write can raise (a remote leaf's descriptor, the attrs
+   hook): the fresh region owns no finalizer yet, so the write rides an
+   unwind cleanup that closes and unlinks it. */
+struct mori_write_ctx { mori_shm *shm; SEXP x; };
+
+static SEXP mori_write_run(void *data) {
+  struct mori_write_ctx *c = (struct mori_write_ctx *) data;
+  mori_layout_write((unsigned char *) c->shm->addr, c->x, 0);
+  return R_NilValue;
+}
+
+static void mori_write_cleanup(void *data, Rboolean jump) {
+  if (jump) {
+    mori_shm *shm = (mori_shm *) data;
+    mori_shm_close_stack(shm, 1);
+    free(shm);
+  }
+}
+
 SEXP mori_create(SEXP x) {
   if (mori_view_check(x)) return x;
 
@@ -1691,7 +1722,11 @@ SEXP mori_create(SEXP x) {
   int rc = mori_shm_create_heap(&shm, total);
   if (rc) mori_shm_create_failed(rc, total);
 
-  mori_layout_write((unsigned char *) shm->addr, x, 0);
+  struct mori_write_ctx ctx = { shm, x };
+  SEXP cont = PROTECT(R_MakeUnwindCont());
+  R_UnwindProtect(mori_write_run, &ctx, mori_write_cleanup, shm,
+                  cont);
+  UNPROTECT(1);
 
   return mori_make_result(shm);
 }
@@ -1843,6 +1878,26 @@ static inline int32_t mori_index_of(SEXP x) {
   }
 }
 
+/* The region mapping a view's keeper chain anchors at — the shm_tag
+   terminus. Borrowed (the view pins it); NULL on a malformed chain or a
+   finalized mapping. Callers gate on mori_view_check: the chain and the
+   identifier are the same truth, so addr/size match the parsed
+   identifier's region. */
+mori_shm *mori_chain_shm(SEXP x) {
+  if (!ALTREP(x)) return NULL;
+  SEXP d1 = R_altrep_data1(x);
+  if (TYPEOF(d1) != EXTPTRSXP ||
+      R_ExternalPtrTag(d1) != mori_owned_tag)
+    return NULL;
+  SEXP hop = R_ExternalPtrProtected(d1);
+  while (TYPEOF(hop) == EXTPTRSXP && R_ExternalPtrTag(hop) != mori_shm_tag)
+    hop = R_ExternalPtrProtected(hop);
+  if (TYPEOF(hop) != EXTPTRSXP) return NULL;
+  mori_shm *shm = (mori_shm *) R_ExternalPtrAddr(hop);
+  if (shm == NULL || shm->addr == NULL) return NULL;
+  return shm;
+}
+
 SEXP mori_shm_name(SEXP x) {
   if (!ALTREP(x)) return R_NilValue;
   SEXP d1 = R_altrep_data1(x);
@@ -1857,13 +1912,11 @@ SEXP mori_shm_name(SEXP x) {
   return Rf_mkString(buf);
 }
 
-/* Unlink shared memory regions by name, or (name == R_NilValue) reap regions
-   orphaned by a dead creating process. Returns the character vector of region
-   names actually removed, or R_NilValue if nothing was removed — including the
-   reap path on platforms that cannot enumerate the SHM namespace (macOS,
-   Windows). Only names matching the view identifier grammar are ever unlinked,
-   so unrelated names are silently ignored; a bracketed sub-object path
-   resolves to its underlying region. */
+/* Reap shared memory regions orphaned by a dead creating process. Returns
+   the character vector of region names actually removed, or R_NilValue if
+   nothing was removed — including on platforms that cannot enumerate the SHM
+   namespace (macOS, Windows). Only names matching the region name grammar
+   are ever unlinked, so unrelated names are silently ignored. */
 SEXP mori_prune(void) {
   int n = 0;
   char **list = mori_shm_reap(&n);
@@ -2094,28 +2147,50 @@ static void mori_root_descriptor(const unsigned char *base,
   }
 }
 
+/* The terminal directory entry of a path over an open region, and the MORL
+   base containing it: every hop re-validated (a VEC entry with attrs_size 0,
+   each span bounding the next read — a tag-33 hop fails the VEC check, so a
+   resolved chain's flattened path never meets one), the terminal read
+   through mori_morl_elem. The re-validation is the resolve-side discipline:
+   the walk that produced a view ran over the same pages, but a re-sent view
+   resolves against the region as it is now — a peer may have rewritten a
+   directory entry since. 0 on success, -1 on any rejection; non-raising, so
+   the callers shape the error — the descriptor's corrupt-or-newer raise, an
+   embedder's decline. */
+int mori_path_entry(const unsigned char *base, int64_t region_size,
+                         const int32_t *path, int path_len,
+                         const unsigned char **leaf_base,
+                         mori_morl_entry *out) {
+  const unsigned char *cur = base;
+  int64_t cur_size = region_size;
+  for (int k = 0; k < path_len - 1; k++) {
+    mori_morl_entry step;
+    if (mori_morl_elem(cur, (size_t) cur_size, path[k], &step) != 0 ||
+        (step.sexptype & ~(int32_t) MORI_MORL_S4) != MORI_TYPE_VEC ||
+        step.attrs_size != 0)
+      return -1;
+    cur += step.data_offset;
+    cur_size = step.data_size;
+  }
+  if (mori_morl_elem(cur, (size_t) cur_size, path[path_len - 1], out) != 0)
+    return -1;
+  *leaf_base = cur;
+  return 0;
+}
+
 /* The resolved leaf's descriptor for a path reference: the terminal
-   directory entry through the vendored mori_morl_elem — the view layer's
-   one read of MORL leaf validity (R reads NA in-band otherwise). The
-   walked structure is trusted: the view-producing walk just validated it
-   over the same pages. A known-NA-free record exists only on an atomic
-   leaf's pair or a chained remote leaf's — STR, serialized and nested-list
-   entries record none. */
+   directory entry through mori_path_entry — the view layer's one read
+   of MORL leaf validity (R reads NA in-band otherwise). A known-NA-free
+   record exists only on an atomic leaf's pair or a chained remote leaf's —
+   STR, serialized and nested-list entries record none. */
 static void mori_path_descriptor(unsigned char *base, int64_t region_size,
                                       const int32_t *path, int path_len,
                                       int64_t *length, int64_t *attrs,
                                       int *na_free) {
-  unsigned char *cur = base;
-  int64_t cur_size = region_size;
-  for (int k = 0; k < path_len - 1; k++) {
-    mori_elem step;
-    memcpy(&step, cur + MORI_HEADER_SIZE + 32 * (size_t) path[k],
-           sizeof(step));
-    cur += step.data_offset;
-    cur_size = step.data_size;
-  }
+  const unsigned char *leaf;
   mori_morl_entry ent;
-  if (mori_morl_elem(cur, (size_t) cur_size, path[path_len - 1], &ent) != 0)
+  if (mori_path_entry(base, region_size, path, path_len, &leaf,
+                           &ent) != 0)
     Rf_error("mori: invalid MORL remote leaf — corrupt or newer region");
   int32_t tag = ent.sexptype & ~(int32_t) MORI_MORL_S4;
   *length = ent.length;
@@ -2137,12 +2212,8 @@ static int mori_ref_descriptor(SEXP elt, SEXP id, int64_t *length,
   int rc = mori_parse_id(CHAR(STRING_ELT(id, 0)), shm_name,
                               sizeof(shm_name), path, &path_len);
   if (rc < 0) return -1;
-  SEXP hop = R_ExternalPtrProtected(R_altrep_data1(elt));
-  while (TYPEOF(hop) == EXTPTRSXP && R_ExternalPtrTag(hop) != mori_shm_tag)
-    hop = R_ExternalPtrProtected(hop);
-  if (TYPEOF(hop) != EXTPTRSXP) return -1;
-  mori_shm *shm = (mori_shm *) R_ExternalPtrAddr(hop);
-  if (shm == NULL || shm->addr == NULL) return -1;
+  mori_shm *shm = mori_chain_shm(elt);
+  if (shm == NULL) return -1;
   if (rc == 0)
     mori_root_descriptor((unsigned char *) shm->addr, length, attrs,
                               na_free);
