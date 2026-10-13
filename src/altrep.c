@@ -188,16 +188,16 @@ static void mori_set_attrs_from(SEXP result, SEXP attrs) {
    read hook; anything else is R_Unserialize as before. An R reader homes
    any attribute set, so the hook's apply is shape-free — a malformed
    blob rejects in the corrupt-region house style from the cursor's own
-   errors. */
-void mori_restore_attrs(SEXP result, unsigned char *buf, size_t size) {
+   errors. The return is the possibly-converted result: the hook may
+   substitute the value (a landing conversion), so callers reassign. */
+SEXP mori_restore_attrs(SEXP result, unsigned char *buf, size_t size) {
   if (size > 0 && buf[0] == MORI_INTEROP_MAGIC &&
-      mori_attrs_read_hook != NULL) {
-    mori_attrs_read_hook(result, buf, size);
-    return;
-  }
+      mori_attrs_read_hook != NULL)
+    return mori_attrs_read_hook(result, buf, size);
   SEXP attrs = PROTECT(mori_unserialize_from(buf, size));
   mori_set_attrs_from(result, attrs);
   UNPROTECT(1);
+  return result;
 }
 
 // Identifier formatter, chain walker, and parser -----------------------------
@@ -675,7 +675,12 @@ static SEXP mori_unwrap_element(unsigned char *base, int64_t region_size,
   if (attrs_size > 0 && sexptype != 0 && sexptype != VECSXP &&
       sexptype != MORI_TAG_REF) {
     size_t attrs_off = (size_t)(data_offset + data_size - attrs_size);
-    mori_restore_attrs(result, base + attrs_off, (size_t) attrs_size);
+    SEXP restored = PROTECT(mori_restore_attrs(
+      result, base + attrs_off, (size_t) attrs_size
+    ));
+    if (s4) restored = Rf_asS4(restored, TRUE, 0);
+    UNPROTECT(2);
+    return restored;
   }
   if (s4) result = Rf_asS4(result, TRUE, 0);
 
@@ -772,10 +777,15 @@ SEXP mori_list_wrap(unsigned char *base, int64_t region_size, int32_t index,
   /* Cache is allocated lazily on first Elt access */
   SEXP result = PROTECT(R_new_altrep(mori_list_class, ptr, R_NilValue));
 
-  if (attrs_size > 0)
-    mori_restore_attrs(result, base + (size_t) attrs_offset,
-                       (size_t) attrs_size);
-  result = mori_apply_s4(result, base);
+  if (attrs_size > 0) {
+    result = PROTECT(mori_restore_attrs(
+      result, base + (size_t) attrs_offset, (size_t) attrs_size
+    ));
+    result = mori_apply_s4(result, base);
+    UNPROTECT(1);
+  } else {
+    result = mori_apply_s4(result, base);
+  }
 
   UNPROTECT(2);
   return result;
@@ -1772,10 +1782,14 @@ static SEXP mori_open_vector(SEXP shm_ptr) {
 
   if (attrs_size > 0) {
     size_t data_bytes = (size_t) length * mori_sizeof_elt(sexptype);
-    mori_restore_attrs(result, base + MORI_HEADER_SIZE + data_bytes,
-                       (size_t) attrs_size);
+    result = PROTECT(mori_restore_attrs(
+      result, base + MORI_HEADER_SIZE + data_bytes, (size_t) attrs_size
+    ));
+    result = mori_apply_s4(result, base);
+    UNPROTECT(1);
+  } else {
+    result = mori_apply_s4(result, base);
   }
-  result = mori_apply_s4(result, base);
 
   UNPROTECT(1);
   return result;
@@ -1805,10 +1819,16 @@ static SEXP mori_open_string(SEXP shm_ptr) {
     base + MORI_HEADER_SIZE, (R_xlen_t) n, str_data_size, shm_ptr, NULL, NULL
   ));
 
-  if (attrs_size > 0)
-    mori_restore_attrs(result, base + MORI_HEADER_SIZE + (size_t) str_data_size,
-                       (size_t) attrs_size);
-  result = mori_apply_s4(result, base);
+  if (attrs_size > 0) {
+    result = PROTECT(mori_restore_attrs(
+      result, base + MORI_HEADER_SIZE + (size_t) str_data_size,
+      (size_t) attrs_size
+    ));
+    result = mori_apply_s4(result, base);
+    UNPROTECT(1);
+  } else {
+    result = mori_apply_s4(result, base);
+  }
 
   UNPROTECT(1);
   return result;

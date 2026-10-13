@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-MIZU_PIN="635df0c1cfe5e32c262faedcd55ad938cb24b98f"    # mizu: Streamline the MIZS string stage: fused walks, bulk foreign fills, frame-column gate
+MIZU_PIN="dbd525871be0541cfa9fac99b30875d5a5ad743b"    # mizu: Advertise MIZU_CAP_MIZL_TSN, landing ns temporal leaves as POSIXct / difftime
 LIBMIZU_PIN="909563b2f1c9f8a46f6b8ca243fb94408c0237c5" # libmizu: Deduplicate shared core helpers and add the channel fork guard
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
