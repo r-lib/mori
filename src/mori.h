@@ -203,6 +203,17 @@ size_t mori_layout_size_sums(SEXP x, int foreign, const size_t *sums,
    identifier parser, and a path walk over an already-open region (keeper
    flows to the returned view's chain). */
 int mori_view_check(SEXP x);
+/* The converting uint64 class (REALSXP, registered beside the vec
+   classes): the landing for a verbatim uint64 frame column (an INT64
+   leaf whose blob is exactly {u64 = TRUE}, MIZU_CAP_MORL_U64V). The
+   region's u64 lanes stay authoritative — the converted doubles cache
+   outside data2, so an exact-export borrow keyed on data2 survives
+   read-only touches; the writable Dataptr COWs the converted values
+   into data2 and releases the loan. mori_u64_rewrap re-wraps an
+   INT64 leaf view as the class over the same keeper and region span
+   (the blob hook's marker landing), taking over its release record. */
+extern R_altrep_class_t mori_u64_class;
+SEXP mori_u64_rewrap(SEXP x);
 /* A view that would REF top-level, unadorned — the remote-leaf writer's
    gate (the REF tier's predicate plus no local attributes: a remote leaf
    carries the referenced column's own attributes, so a locally attributed

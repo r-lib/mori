@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-MIZU_PIN="dbd525871be0541cfa9fac99b30875d5a5ad743b"    # mizu: Advertise MIZU_CAP_MIZL_TSN, landing ns temporal leaves as POSIXct / difftime
+MIZU_PIN="9c52e487ddb98a0f91e5c54da0be5da9c51e59ed"    # mizu: Land verbatim uint64 columns as the converting u64 view class
 LIBMIZU_PIN="909563b2f1c9f8a46f6b8ca243fb94408c0237c5" # libmizu: Deduplicate shared core helpers and add the channel fork guard
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"

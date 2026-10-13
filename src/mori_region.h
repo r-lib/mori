@@ -1,6 +1,6 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: 6b09c9f35b33630f217ea2fc0103bb016449d524 (commit 6b09c9f35b33630f217ea2fc0103bb016449d524, 2026-10-12T17:16:48+01:00)
+   Ref: 820fb377c22f5c1bd986c5d9dec14986d02f086e (commit 820fb377c22f5c1bd986c5d9dec14986d02f086e, 2026-10-13T14:58:10+01:00)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
@@ -93,7 +93,10 @@ MORI_API const char *mori_last_error_message(void);
    nested header / the string block carries its own), and [48-55] is the
    total null count across that header's remaining leaves. Reserved-zero
    means absent, so a pre-dating reader simply never looks; the section
-   needs no capability bit. */
+   needs no capability bit. When the pair is not {0, 0} the section is the
+   authoritative null record: the in-band sentinels are the null-slot fill,
+   and a writer emitting a section writes the wire type's sentinel at every
+   clear bit (DESIGN.md's validity-as-data rules are normative). */
 #define MORI_HDR_VALID_OFF   ((size_t) 40)
 #define MORI_HDR_VALID_COUNT ((size_t) 48)
 
@@ -224,6 +227,10 @@ typedef enum mori_type_e {
    shares the value grammar) */
 #define MORI_CAP_MORL_REF (1u << 4) /**< reads MORL remote leaves —
    directory tag 33 */
+#define MORI_CAP_MORL_TSN (1u << 5) /**< reads MORL INT64 leaves carrying
+   a tscale attribute — verbatim nanosecond timestamps and durations */
+#define MORI_CAP_MORL_U64V (1u << 6) /**< reads MORL INT64 leaves carrying
+   a u64 attribute — verbatim uint64 frame columns */
 
 /** The identity word: the language in bits 0-7, the 32-bit capability mask
    in bits 32-63, bits 8-31 reserved — written zero and ignored by readers
