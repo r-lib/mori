@@ -366,6 +366,7 @@ static int mori_shm_os_unlink(const char *name) {
 
 #include <signal.h>
 #include <dirent.h>
+#include <ctype.h>
 
 static int mori_pid_alive(pid_t pid) {
   if (pid <= 0) return 1;             /* never treat as reapable */
@@ -402,7 +403,7 @@ static int mori_reap_unlink(const char *name,
    declines it. */
 static int mori_reap_log(const char *path, unsigned long pid,
                         char ***list, size_t *cap, size_t *count) {
-  FILE *f = fopen(path, "rb");
+  FILE *f = fopen(path, "rbe");       /* 'e': O_CLOEXEC, per the liveness discipline */
   if (f == NULL) return 0;
   uint32_t rec;
   int rc = 0;
@@ -416,7 +417,7 @@ static int mori_reap_log(const char *path, unsigned long pid,
       break;
     }
   }
-  fclose(f);
+  (void) fclose(f);
   return rc;
 }
 #endif
@@ -448,6 +449,16 @@ char **mori_shm_reap(int *n) {
     char *end;
     long pid = strtol(pid_str, &end, 16);
     if (end == pid_str || *end != '_') continue;    /* not <pid>_<counter> */
+    /* the region grammar is exactly "mori_<pid>_<ctr>" — the liveness
+       lock files sharing this directory ("mori_<pid>_<ctr>.live.host",
+       "...wk.0", "...owner", ...) are not regions and must never be
+       unlinked here */
+    char *end2;
+    if (isxdigit((unsigned char) end[1]))
+      (void) strtoul(end + 1, &end2, 16);
+    else
+      end2 = (char *) end + 1;
+    if (end2 == end + 1 || *end2 != '\0') continue;  /* a lock file */
     if (mori_pid_alive((pid_t) pid)) continue;       /* creator still alive */
 
     char shm_name[MORI_NAME_MAX];                    /* shm name = "/" + entry */
@@ -718,44 +729,3 @@ void mori_shm_host_release(mori_shm *shm) {
 #endif
 }
 
-// Public heap API (mori_region.h) ----------------------------------------------------
-
-/* The public region verbs are the heap form plus the thread-local error
-   record on failure. */
-
-mori_status mori_shm_create(mori_shm **out, size_t size) {
-  int rc = mori_shm_create_heap(out, size);
-  if (rc == MORI_ERRCAT_NONE) return MORI_OK;
-  const char *summary, *hint;
-  mori_err_describe((mori_errcat) rc, &summary, &hint);
-  mori_err_record_tls((mori_errcat) rc,
-                     "cannot create region (%llu bytes): %s%s%s",
-                     (unsigned long long) size, summary,
-                     hint[0] != '\0' ? ". " : "", hint);
-  return MORI_ERR;
-}
-
-mori_status mori_shm_open(mori_shm **out, const char *name) {
-  *out = mori_shm_open_heap(name);
-  if (*out != NULL) return MORI_OK;
-  mori_err_record_tls(MORI_ERRCAT_OTHER, "cannot open region '%s'", name);
-  return MORI_ERR;
-}
-
-void mori_shm_close(mori_shm *shm, int unlink) {
-  if (shm == NULL) return;
-  mori_shm_close_stack(shm, unlink);
-  free(shm);
-}
-
-void *mori_shm_addr(mori_shm *shm) {
-  return shm->addr;
-}
-
-size_t mori_shm_size(const mori_shm *shm) {
-  return shm->size;
-}
-
-const char *mori_shm_region_name(const mori_shm *shm) {
-  return shm->name;
-}

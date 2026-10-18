@@ -1,12 +1,12 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: 820fb377c22f5c1bd986c5d9dec14986d02f086e (commit 820fb377c22f5c1bd986c5d9dec14986d02f086e, 2026-10-13T14:58:10+01:00)
+   Ref: db8ae7fe1457998e538427ac708f0f38cf330596 (commit db8ae7fe1457998e538427ac708f0f38cf330596, 2026-10-18T16:12:07+01:00)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
    wire-format constants and the layout helpers (geometry, validity, NA
    bitmaps, MORL directory entries) the vendored view layer resolves onto.
-   This header, shm.c and err_tls.c are host-language independent. */
+   This header and shm.c are host-language independent. */
 
 #ifndef MORI_REGION_H
 #define MORI_REGION_H
@@ -25,6 +25,15 @@
 #  define MORI_MAYBE_UNUSED __attribute__((unused))
 #else
 #  define MORI_MAYBE_UNUSED
+#endif
+
+/* Cold annotation for shm.c's failure paths (mori_err_describe and the
+   error recorders it no longer vendors). Upstream defines this in the
+   internal header, above the carve boundary. */
+#if defined(_MSC_VER)
+#  define MORI_COLD
+#else
+#  define MORI_COLD __attribute__((cold))
 #endif
 
 typedef struct mori_shm_s mori_shm;
@@ -58,11 +67,6 @@ typedef enum mori_errcat_e {
   MORI_ERRCAT_OTHER
 } mori_errcat;
 
-/** Error access. Handle verbs record the category + message on the handle;
-   both are valid until the next call on that handle. Handle-free entry
-   points (regions, prune) use a thread-local slot instead. */
-MORI_API mori_errcat mori_last_error_category(void);
-MORI_API const char *mori_last_error_message(void);
 
 
 // Wire format: MORH / MORS / MORL region layouts ---------------------------------
@@ -590,44 +594,6 @@ void mori_log_teardown(void);
    unlink) / creator handle (Windows) without touching the mapping. */
 void mori_shm_host_release(mori_shm *shm);
 
-/* Cold annotation for the error recorders: they sit on every hot verb's
-   failure branches, and as returning variadic functions they otherwise
-   force the compiler to treat those branches as live (register pressure,
-   worse layout, blown inline budgets). */
-#if defined(_MSC_VER)
-#  define MORI_COLD
-#else
-#  define MORI_COLD __attribute__((cold))
-#endif
-
-// Errors ---------------------------------------------------------------------------
-
-MORI_COLD void mori_err_record_tls(mori_errcat cat, const char *fmt, ...);
-
-
-// Regions (mori_shm) ----------------------------------------------------------------
-
-/** Heap-only (the stack form stays internal). create pre-faults on
-   Linux. open maps read-only; open_rw maps writable (populate
-   pre-faults); open_view is the zc consumer open: page 0 RW (the
-   refcount word), the rest read-only — and performs the zc counted add
-   itself, so a binding cannot hold a view mapping without the count.
-   open_view_flags is the flags form: MORI_OPEN_VIEW_NOCOUNT skips the
-   counted add — the caller then owns the mori_zc_ref timing and must
-   complete it before its consumer-done signal (a binding whose wrap can
-   fail between map and count opens first and counts at wrap).
-   close unmaps and frees the handle; unlink != 0 also removes the name.
-   On failure these return MORI_ERR with the category in the thread-local
-   error slot. addr/size/name are borrowed reads, valid until close. */
-#define MORI_OPEN_VIEW_NOCOUNT 1u /**< caller performs the counted add itself */
-MORI_API mori_status mori_shm_create(mori_shm **out, size_t size);
-MORI_API mori_status mori_shm_open(mori_shm **out, const char *name);
-MORI_API mori_status mori_shm_open_view_flags(mori_shm **out, const char *name,
-                                           uint32_t flags);
-MORI_API void mori_shm_close(mori_shm *, int unlink);
-MORI_API void *mori_shm_addr(mori_shm *);
-MORI_API size_t mori_shm_size(const mori_shm *);
-MORI_API const char *mori_shm_region_name(const mori_shm *);
 
 /** Reap /mori_ orphans of dead creators. Returns a malloc'd array of
    malloc'd names (free each, then the array), *n the count; NULL when

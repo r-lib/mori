@@ -1,5 +1,6 @@
 #include <limits.h>
 #include <stdlib.h>
+#include <R_ext/Utils.h>
 #include "mori.h"
 
 /* ANY_ATTRIB() joined the C API in R 4.5.0; equivalent fallback for
@@ -430,6 +431,90 @@ static void *mori_vec_Dataptr(SEXP x, Rboolean writable) {
   return p;
 }
 
+/* Element and range reads straight off the shared pages (data2 once
+   materialized): without them R's defaults issue a writable DATAPTR
+   request, so the first x[1] would COW-materialize the whole view and fire
+   the loan. */
+static double mori_real_Elt(SEXP x, R_xlen_t i) {
+  SEXP d2 = R_altrep_data2(x);
+  if (d2 != R_NilValue) return REAL_ELT(d2, i);
+  mori_vec *v = (mori_vec *) R_ExternalPtrAddr(R_altrep_data1(x));
+  return ((const double *) v->data)[i];
+}
+
+static int mori_integer_Elt(SEXP x, R_xlen_t i) {
+  SEXP d2 = R_altrep_data2(x);
+  if (d2 != R_NilValue) return INTEGER_ELT(d2, i);
+  mori_vec *v = (mori_vec *) R_ExternalPtrAddr(R_altrep_data1(x));
+  return ((const int *) v->data)[i];
+}
+
+static int mori_logical_Elt(SEXP x, R_xlen_t i) {
+  SEXP d2 = R_altrep_data2(x);
+  if (d2 != R_NilValue) return LOGICAL_ELT(d2, i);
+  mori_vec *v = (mori_vec *) R_ExternalPtrAddr(R_altrep_data1(x));
+  return ((const int *) v->data)[i];
+}
+
+static Rbyte mori_raw_Elt(SEXP x, R_xlen_t i) {
+  SEXP d2 = R_altrep_data2(x);
+  if (d2 != R_NilValue) return RAW_ELT(d2, i);
+  mori_vec *v = (mori_vec *) R_ExternalPtrAddr(R_altrep_data1(x));
+  return ((const Rbyte *) v->data)[i];
+}
+
+static Rcomplex mori_complex_Elt(SEXP x, R_xlen_t i) {
+  SEXP d2 = R_altrep_data2(x);
+  if (d2 != R_NilValue) return COMPLEX_ELT(d2, i);
+  mori_vec *v = (mori_vec *) R_ExternalPtrAddr(R_altrep_data1(x));
+  return ((const Rcomplex *) v->data)[i];
+}
+
+static R_xlen_t mori_vec_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                     void *buf) {
+  SEXP d2 = R_altrep_data2(x);
+  const size_t elt = mori_sizeof_elt(TYPEOF(x));
+  const char *src;
+  R_xlen_t len;
+  if (d2 != R_NilValue) {
+    src = (const char *) DATAPTR_RO(d2);
+    len = XLENGTH(d2);
+  } else {
+    mori_vec *v = (mori_vec *) R_ExternalPtrAddr(R_altrep_data1(x));
+    src = (const char *) v->data;
+    len = v->length;
+  }
+  if (i >= len) return 0;
+  const R_xlen_t ncopy = len - i < n ? len - i : n;
+  memcpy(buf, src + (size_t) i * elt, (size_t) ncopy * elt);
+  return ncopy;
+}
+
+static R_xlen_t mori_real_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                          double *buf) {
+  return mori_vec_region(x, i, n, buf);
+}
+
+static R_xlen_t mori_integer_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                             int *buf) {
+  return mori_vec_region(x, i, n, buf);
+}
+
+static R_xlen_t mori_logical_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                             int *buf) {
+  return mori_vec_region(x, i, n, buf);
+}
+
+static R_xlen_t mori_raw_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                         Rbyte *buf) {
+  return mori_vec_region(x, i, n, buf);
+}
+
+static R_xlen_t mori_complex_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                             Rcomplex *buf) {
+  return mori_vec_region(x, i, n, buf);
+}
+
 /* keeper: SEXP kept alive via the extptr's protected slot (parent SHM).
    release/release_arg: embedder once-hook (mori_owned member). */
 SEXP mori_vec_wrap(const void *data, R_xlen_t length, int sexptype,
@@ -561,6 +646,34 @@ static void *mori_u64_Dataptr(SEXP x, Rboolean writable) {
   v->converted = NULL;
   mori_release_once(&v->owned);
   return p;
+}
+
+/* The u64 element reads: per element off the conversion cache (the first
+   touch builds it, warning included — the Dataptr discipline). */
+static double mori_u64_Elt(SEXP x, R_xlen_t i) {
+  SEXP d2 = R_altrep_data2(x);
+  if (d2 != R_NilValue) return REAL_ELT(d2, i);
+  mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(R_altrep_data1(x));
+  return mori_u64_convert(v)[i];
+}
+
+static R_xlen_t mori_u64_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
+                                         double *buf) {
+  SEXP d2 = R_altrep_data2(x);
+  const double *src;
+  R_xlen_t len;
+  if (d2 != R_NilValue) {
+    src = (const double *) DATAPTR_RO(d2);
+    len = XLENGTH(d2);
+  } else {
+    mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(R_altrep_data1(x));
+    src = mori_u64_convert(v);
+    len = v->length;
+  }
+  if (i >= len) return 0;
+  const R_xlen_t ncopy = len - i < n ? len - i : n;
+  memcpy(buf, src + i, (size_t) ncopy * sizeof(double));
+  return ncopy;
 }
 
 static SEXP mori_u64_Serialized_state(SEXP x) {
@@ -1247,6 +1360,7 @@ static int mori_ref_descriptor(SEXP elt, SEXP id, int64_t *length,
 static size_t mori_nested_size(SEXP x, int *ok, int foreign,
                                     mori_sump *sp) {
 
+  R_CheckStack();   /* deep trees must raise here, not segfault below */
   R_xlen_t n = XLENGTH(x);
   size_t total = MORI_ALIGN64(MORI_HEADER_SIZE + 32 * (size_t) n);
   size_t valid_reserve = 0;
@@ -1337,6 +1451,7 @@ static size_t mori_nested_size(SEXP x, int *ok, int foreign,
    already ran is never repeated here. */
 static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
 
+  R_CheckStack();   /* deep trees must raise here, not segfault below */
   R_xlen_t n = XLENGTH(x);
   size_t cur = MORI_ALIGN64(MORI_HEADER_SIZE + 32 * (size_t) n);
 
@@ -2480,6 +2595,76 @@ void mori_release_now(SEXP x) {
   if (o != NULL) mori_release_once(o);
 }
 
+// Remote-leaf directory walk ----------------------------------------------------
+
+/* Report every tag-33 identifier span in an MORL tree to fn, once per
+   occurrence (dedupe is the caller's). The lazy element reader counts a
+   remote leaf's region only at first access — after the consumer-done
+   signal — so an embedder that wants the referenced regions held from the
+   wrap walks here and loans them itself. Iterates with an explicit stack
+   (nesting depth is region-bounded, not call-bounded) and validates every
+   header and span it reads, mirroring the lazy readers' corrupt-or-newer
+   rejections. */
+void mori_morl_remote_walk(unsigned char *base, int64_t region_size,
+                                mori_remote_fn fn, void *ctx) {
+  struct walk_frame { unsigned char *base; int64_t size; };
+  size_t cap = 8, top = 0;
+  struct walk_frame *st = malloc(cap * sizeof *st);
+  if (st == NULL) Rf_error("mori: allocation failure");
+#define MORI_WALK_FAIL(...) do { free(st); Rf_error(__VA_ARGS__); } while (0)
+  st[top++] = (struct walk_frame) { base, region_size };
+  while (top > 0) {
+    struct walk_frame f = st[--top];
+    if (f.size < MORI_HEADER_SIZE)
+      MORI_WALK_FAIL("mori: invalid nested list region");
+    uint32_t magic;
+    memcpy(&magic, f.base, 4);
+    if (magic != MORI_MAGIC_LIST)
+      MORI_WALK_FAIL("mori: invalid nested list region");
+    int32_t n;
+    int64_t attrs_offset, attrs_size;
+    memcpy(&n, f.base + 4, 4);
+    memcpy(&attrs_offset, f.base + 8, 8);
+    memcpy(&attrs_size, f.base + 16, 8);
+    if (n < 0 || n > (f.size - MORI_HEADER_SIZE) / 32 ||
+        mori_oob(attrs_offset, attrs_size, f.size) ||
+        !mori_flags_known(f.base))
+      MORI_WALK_FAIL("mori: invalid nested list region");
+    for (int32_t i = 0; i < n; i++) {
+      mori_elem entry;
+      memcpy(&entry, f.base + MORI_HEADER_SIZE + 32 * (size_t) i,
+             sizeof(entry));
+      int32_t tag = entry.sexptype & ~MORI_ELEM_S4;
+      if (mori_oob(entry.data_offset, entry.data_size, f.size) ||
+          (entry.data_offset & 63) != 0)
+        MORI_WALK_FAIL("mori: invalid element data");
+      if (tag == MORI_TAG_REF) {
+        if (entry.data_size < 1 || entry.data_size > 255)
+          MORI_WALK_FAIL(
+            "mori: invalid MORL remote leaf — corrupt or newer region");
+        fn((const char *) f.base + entry.data_offset,
+           (int) entry.data_size, ctx);
+      } else if (tag == VECSXP) {
+        if (top == cap) {
+          cap *= 2;
+          struct walk_frame *bigger =
+            realloc(st, cap * sizeof *st);
+          if (bigger == NULL) {
+            free(st);
+            Rf_error("mori: allocation failure");
+          }
+          st = bigger;
+        }
+        st[top++] = (struct walk_frame) {
+          f.base + entry.data_offset, entry.data_size
+        };
+      }
+    }
+  }
+  free(st);
+#undef MORI_WALK_FAIL
+}
+
 /* Vec and list classes: a STRSXP state is always an SHM identifier (their
    materialized fallbacks are atomic vectors or VECSXP, never STRSXP), so a
    probe miss means a corrupt stream. A well-formed identifier whose region
@@ -2519,7 +2704,8 @@ typedef R_altrep_class_t (*mori_make_class_fn)(const char *, const char *,
                                                DllInfo *);
 
 /* Register one of the 5 atomic ALTREP vector classes, all sharing the same
-   method set (mori_vec_*). */
+   method set (mori_vec_*); the per-type Elt / Get_region pair joins at
+   the call sites below. */
 static R_altrep_class_t mori_register_vec_class(mori_make_class_fn make,
                                                 const char *name,
                                                 DllInfo *dll) {
@@ -2563,14 +2749,29 @@ void mori_altrep_init(DllInfo *dll) {
   /* ALTREP atomic vector classes (all share the same mori_vec_* methods) */
   mori_real_class    = mori_register_vec_class(R_make_altreal_class,
                                                "mori_real",    dll);
+  R_set_altreal_Elt_method(mori_real_class, mori_real_Elt);
+  R_set_altreal_Get_region_method(mori_real_class,
+                                  mori_real_Get_region);
   mori_integer_class = mori_register_vec_class(R_make_altinteger_class,
                                                "mori_integer", dll);
+  R_set_altinteger_Elt_method(mori_integer_class, mori_integer_Elt);
+  R_set_altinteger_Get_region_method(mori_integer_class,
+                                     mori_integer_Get_region);
   mori_logical_class = mori_register_vec_class(R_make_altlogical_class,
                                                "mori_logical", dll);
+  R_set_altlogical_Elt_method(mori_logical_class, mori_logical_Elt);
+  R_set_altlogical_Get_region_method(mori_logical_class,
+                                     mori_logical_Get_region);
   mori_raw_class     = mori_register_vec_class(R_make_altraw_class,
                                                "mori_raw",     dll);
+  R_set_altraw_Elt_method(mori_raw_class, mori_raw_Elt);
+  R_set_altraw_Get_region_method(mori_raw_class,
+                                 mori_raw_Get_region);
   mori_complex_class = mori_register_vec_class(R_make_altcomplex_class,
                                                "mori_complex", dll);
+  R_set_altcomplex_Elt_method(mori_complex_class, mori_complex_Elt);
+  R_set_altcomplex_Get_region_method(mori_complex_class,
+                                     mori_complex_Get_region);
 
   /* the converting uint64 class (the MIZU_CAP_MORL_U64V landing) */
   mori_u64_class = R_make_altreal_class("mizu_u64", "mori", dll);
@@ -2578,6 +2779,9 @@ void mori_altrep_init(DllInfo *dll) {
   R_set_altvec_Dataptr_method(mori_u64_class, mori_u64_Dataptr);
   R_set_altvec_Dataptr_or_null_method(mori_u64_class,
                                       mori_u64_Dataptr_or_null);
+  R_set_altreal_Elt_method(mori_u64_class, mori_u64_Elt);
+  R_set_altreal_Get_region_method(mori_u64_class,
+                                  mori_u64_Get_region);
   R_set_altrep_Serialized_state_method(mori_u64_class,
                                        mori_u64_Serialized_state);
   R_set_altrep_Unserialize_method(mori_u64_class,

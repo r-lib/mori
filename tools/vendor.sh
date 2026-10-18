@@ -11,8 +11,8 @@
 # Generated files (never edit by hand; changes go upstream and are pulled by
 # re-running this script):
 #   src/mori_region.h  assembled from carved libmizu mizu.h / mizu_ext.h / internal.h / api.c sections
-#   src/shm.c          libmizu src/shm.c
-#   src/err_tls.c      libmizu src/err_tls.c
+#   src/shm.c          libmizu src/shm.c (public handle API stripped: unused — see the
+#                        carve notes; that also orphans err_tls.c, which is not vendored)
 #   src/mori.h         mizu src/view.h
 #   src/altrep.c       mizu src/view.c
 #   src/serialize.c    mizu src/serialize.c
@@ -31,8 +31,8 @@
 
 set -euo pipefail
 
-MIZU_PIN="9c52e487ddb98a0f91e5c54da0be5da9c51e59ed"    # mizu: Land verbatim uint64 columns as the converting u64 view class
-LIBMIZU_PIN="909563b2f1c9f8a46f6b8ca243fb94408c0237c5" # libmizu: Deduplicate shared core helpers and add the channel fork guard
+MIZU_PIN="50dd5fddb4b7ee9d44850acadbac30b5ae9d3823"    # mizu: Stop vendoring libmizu ext.c (the FFI-only accessor half)
+LIBMIZU_PIN="db8ae7fe1457998e538427ac708f0f38cf330596" # libmizu: Accept no-sizes string_view exports in mizu_arrow_str_at
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/src"
@@ -149,7 +149,7 @@ if [ "$do_region" -eq 1 ]; then
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
    wire-format constants and the layout helpers (geometry, validity, NA
    bitmaps, MIZL directory entries) the vendored view layer resolves onto.
-   This header, shm.c and err_tls.c are host-language independent. */
+   This header and shm.c are host-language independent. */
 
 #ifndef MORI_REGION_H
 #define MORI_REGION_H
@@ -170,10 +170,22 @@ if [ "$do_region" -eq 1 ]; then
 #  define MORI_MAYBE_UNUSED
 #endif
 
+/* Cold annotation for shm.c's failure paths (mori_err_describe and the
+   error recorders it no longer vendors). Upstream defines this in the
+   internal header, above the carve boundary. */
+#if defined(_MSC_VER)
+#  define MORI_COLD
+#else
+#  define MORI_COLD __attribute__((cold))
+#endif
+
 typedef struct mori_shm_s mori_shm;
 
 EOF
-    carve "$libmizu_root/include/mizu.h" '^// Status and errors' '^// Opaque handles'
+    # The TLS error accessors go with err_tls.c (not vendored — see the
+    # internal.h carve note below).
+    carve "$libmizu_root/include/mizu.h" '^// Status and errors' '^// Opaque handles' |
+      filter_decls "mizu_last_error_category mizu_last_error_message"
     echo
     carve "$libmizu_root/include/mizu.h" '^// Wire format: MIZH' '^// Wire format: pool region'
     echo
@@ -234,17 +246,30 @@ EOF
     echo
     carve "$libmizu_root/include/mizu_ext.h" '^/\*\* One bounds-checked MIZL directory entry' '^/\*\* The sentinels-to-bitmap scan'
     echo
-    carve "$libmizu_root/src/internal.h" '^// Region layer internals' '^// Spin machinery' |
-      filter_decls "mizu_region_unlink mizu_err_record mizu_shm_open_rw_stack mizu_shm_open_rw_heap mizu_shm_create_populate mizu_shm_open_ro_heap MIZU_ALIGN64"
+    # Ends at the error-recorder block: the TLS error slot is embedder
+    # surface mori never reads (region failures are reported via
+    # mori_err_describe), so err_tls.c's declarations are excluded and
+    # err_tls.c itself is not vendored. MIZU_COLD, used by shm.c's cold
+    # paths, is re-established in the preamble above.
+    carve "$libmizu_root/src/internal.h" '^// Region layer internals' '^/\* Cold annotation' |
+      filter_decls "mizu_region_unlink mizu_shm_open_rw_stack mizu_shm_open_rw_heap mizu_shm_create_populate mizu_shm_open_ro_heap MIZU_ALIGN64"
     echo
-    carve "$libmizu_root/include/mizu.h" '^// Regions (mizu_shm)' '^/\*\* The consumer side of the zc' |
-      filter_decls "mizu_shm_open_rw mizu_shm_open_view"
+    # Only the reaper: the public handle verbs (create/open/close/
+    # addr/size/name, open_rw/open_view*) go unused — the view layer
+    # drives the stack/heap ext tier and reads the struct fields
+    # directly. Their shm.c definitions are stripped below.
+    carve "$libmizu_root/include/mizu.h" '^/\*\* Reap /mizu_ orphans' '^/\*\* The consumer side of the zc'
     echo
     echo "#endif /* MORI_REGION_H */"
   } > "$DEST/mori_region.h"
 
+  # Strip the public handle API (banner to EOF): unused by the view
+  # layer, and its TLS error record was the sole caller of err_tls.c's
+  # recorder — with both gone the read accessors have no readers either.
   cp "$libmizu_root/src/shm.c" "$DEST/shm.c"
-  cp "$libmizu_root/src/err_tls.c" "$DEST/err_tls.c"
+  grep -q '^// Public heap API' "$DEST/shm.c" || { echo "vendor: FAIL — shm.c public-API banner missing" >&2; exit 1; }
+  sed -i.bak '\|^// Public heap API|,$d' "$DEST/shm.c"
+  rm -f "$DEST/shm.c.bak"
 
   # The enumerated substitution set — the only transformation performed.
 
@@ -269,8 +294,8 @@ EOF
   # 7. The macOS registry dir.
   # 8. Includes: the vendored TUs' libmizu headers resolve to the generated
   #    header here.
-  # 9. Comment mentions of the internal header (err_tls.c's cold-annotation
-  #    note) — the gate forbids the literal string anywhere.
+  # 9. Comment mentions of the internal header — the gate forbids the
+  #    literal string anywhere.
   sed -i.bak \
     -e 's|mizu_shm_reap()|prune_shared()|g' \
     -e 's|mizu_shm_name|mori_shm_region_name|g' \
@@ -293,15 +318,15 @@ EOF
     -e 's|mizu\.h|mori_region.h|g' \
     -e 's|internal\.h|the internal header|g' \
     -e 's|MORI_PYMORI_CODEC_MAGIC|MORI_PYMIZU_CODEC_MAGIC|g' \
-    "$DEST/mori_region.h" "$DEST/shm.c" "$DEST/err_tls.c"
+    "$DEST/mori_region.h" "$DEST/shm.c"
 
-  rm -f "$DEST/mori_region.h.bak" "$DEST/shm.c.bak" "$DEST/err_tls.c.bak"
+  rm -f "$DEST/mori_region.h.bak" "$DEST/shm.c.bak"
 
   # The gate: no stray mizu/MIZU remnants may survive substitution.
   # MORI_PYMIZU_CODEC_MAGIC is the one intentional MIZU_ infix (see the
   # repair rule above).
   if grep -nE 'PYMORI|mizu_|MIZU_|0x4D495A|MIZH|MIZS|MIZL|mizh_|mizs_|mizl_|mizu\.h|mizu_ext\.h|internal\.h' \
-      "$DEST/mori_region.h" "$DEST/shm.c" "$DEST/err_tls.c" | grep -v 'MORI_PYMIZU_CODEC_MAGIC'; then
+      "$DEST/mori_region.h" "$DEST/shm.c" | grep -v 'MORI_PYMIZU_CODEC_MAGIC'; then
     echo "vendor: FAIL — stray mizu remnants above (region layer)" >&2
     exit 1
   fi
@@ -321,11 +346,13 @@ if [ "$do_view" -eq 1 ]; then
   # 1. Names the cutover de-stuttered in mizu's namespace map back to their
   #    historical mori names. Word-boundaried so mizu_view_list_wrap /
   #    mizu_view_list_class and friends fall through to the generic rules.
-  #    Must run before them.
+  #    Must run before them. mizu_view_mizl_remote_walk keeps its mizl
+  #    infix, renamed per the layout-helper convention (mizl -> morl).
   # 2. The view layer's own symbols and macros (the "mizu_view_shm" extptr
   #    tags and the MIZU_VIEW_H include guard land here too).
   # 3. The header's own filename, in includes and comments.
   sed -i.bak \
+    -e 's|mizu_view_mizl_remote_walk|mori_morl_remote_walk|g' \
     -e 's|mizu_view_check|mori_view_check|g' \
     -e 's|[[:<:]]mizu_view_list[[:>:]]|mori_list_view|g' \
     -e 's|[[:<:]]mizu_view_list_s[[:>:]]|mori_list_view_s|g' \
@@ -373,6 +400,7 @@ if [ "$do_view" -eq 1 ]; then
     -e 's|MIZU_NA_INT32|MORI_NA_INT32|g' \
     -e 's|MIZU_NA_INT64|MORI_NA_INT64|g' \
     -e 's|MIZU_TYPE_|MORI_TYPE_|g' \
+    -e 's|MIZU_WALK_FAIL|MORI_WALK_FAIL|g' \
     -e 's|MIZU_INTEROP_MAGIC|MORI_INTEROP_MAGIC|g' \
     -e 's|MIZU_OPEN_CACHE_MAX|MORI_OPEN_CACHE_MAX|g' \
     -e 's|mizu_ext\.h|mori_region.h|g' \
@@ -396,7 +424,7 @@ if [ "$do_view" -eq 1 ]; then
 
   # The gate: no mizu-namespace reference may remain (a missed identifier
   # fails loud at link time; a missed string forks the namespace silently).
-  if grep -nE 'mizu_view_|MIZU_VIEW_|mizu_shm|MIZU_MAGIC_|MIZU_HEADER_SIZE|MIZU_NAME_MAX|MIZU_PREFIX_LITERAL|MIZU_TYPE_|MIZU_INTEROP_MAGIC|MIZU_OPEN_CACHE_MAX|MIZU_HDR_|MIZU_NA_|MIZU_MIZL|mizu_mizs|mizu_mizh|mizu_mizl|mizu_ext_|mizu_na_build|mizu_type_e|mizu_ext\.h|libmizu|view\.h|MIZH|MIZS|MIZL|mizh_|mizs_|mizl_|"mizu_list"|"mizu_real"|"mizu_integer"|"mizu_logical"|"mizu_raw"|"mizu_complex"|"mizu_string"|"mizu: |, "mizu", dll\)' \
+  if grep -nE 'mizu_view_|MIZU_VIEW_|mizu_shm|MIZU_MAGIC_|MIZU_HEADER_SIZE|MIZU_NAME_MAX|MIZU_PREFIX_LITERAL|MIZU_TYPE_|MIZU_INTEROP_MAGIC|MIZU_OPEN_CACHE_MAX|MIZU_HDR_|MIZU_NA_|MIZU_MIZL|MIZU_WALK|mizu_mizs|mizu_mizh|mizu_mizl|mizu_ext_|mizu_na_build|mizu_type_e|mizu_ext\.h|libmizu|view\.h|MIZH|MIZS|MIZL|mizh_|mizs_|mizl_|"mizu_list"|"mizu_real"|"mizu_integer"|"mizu_logical"|"mizu_raw"|"mizu_complex"|"mizu_string"|"mizu: |, "mizu", dll\)' \
       "$DEST/mori.h" "$DEST/altrep.c" "$DEST/serialize.c"; then
     echo "vendor: FAIL — mizu-namespace remnants above (view layer)" >&2
     exit 1
