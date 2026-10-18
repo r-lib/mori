@@ -31,7 +31,7 @@ rmarkdown::render("README.Rmd")                     # rebuild README.md
 ``` bash
 R CMD build .
 R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
-bash tools/vendor.sh                    # re-vendor both layers: region (shm.c, err_tls.c, mori_region.h) from libmizu, view (mori.h, altrep.c, serialize.c) from mizu
+bash tools/vendor.sh                    # re-vendor both layers: region (shm.c, mori_region.h) from libmizu, view (mori.h, altrep.c, serialize.c) from mizu
 bash tools/vendor.sh --region-only      # region layer only; --view-only for the view layer; --mizu/--libmizu override the refs
 ```
 
@@ -41,14 +41,18 @@ bash tools/vendor.sh --region-only      # region layer only; --view-only for the
 - R’s in-source build ignores header dependencies: after re-vendoring,
   `rm src/*.o src/*.so` before reinstalling — stale objects linked
   against old struct layouts cause sizeof mismatches and garbage fields.
-- `src/shm.c`, `src/err_tls.c` and `src/mori_region.h` are vendored from
-  libmizu by `tools/vendor.sh` (pinned ref, enumerated substitutions,
-  self-grep gate) — never edit them by hand; changes go upstream to
-  libmizu and are pulled by re-running the script. `mori_region.h` also
-  carries the carved wire-format helpers (`mori_mors_geometry`,
-  `mori_morh_validity_set`, `mori_na_build`, the MIZL directory-entry
-  reader `mori_morl_elem` and its chain, the type tags) the view layer
-  resolves onto.
+- `src/shm.c` and `src/mori_region.h` are vendored from libmizu by
+  `tools/vendor.sh` (pinned ref, enumerated substitutions, self-grep
+  gate) — never edit them by hand; changes go upstream to libmizu and
+  are pulled by re-running the script. shm.c vendors without its public
+  handle API (banner-to-EOF strip) and err_tls.c not at all: the view
+  layer drives the stack/heap ext tier and reads the `mori_shm` struct
+  fields directly, and the TLS error slot is embedder surface mori never
+  reads — region failures are reported via `mori_err_describe`.
+  `mori_region.h` also carries the carved wire-format helpers
+  (`mori_mors_geometry`, `mori_morh_validity_set`, `mori_na_build`, the
+  MIZL directory-entry reader `mori_morl_elem` and its chain, the type
+  tags) the view layer resolves onto.
 - `src/mori.h`, `src/altrep.c` and `src/serialize.c` — the view layer:
   the ALTREP consumer classes, the MORH/MORS/MORL layout oracle/writer,
   and the exact-size serialize streams — are vendored from **mizu** by
@@ -101,10 +105,10 @@ bash tools/vendor.sh --region-only      # region layer only; --view-only for the
   locking anywhere — any change admitting in-place mutation breaks the
   model.
 - Names embed creator PID + randomly-seeded per-process counter
-  (`mori_<pid>_<counter>`, `mori_region_name`). `mori_shm_create` uses
-  `O_EXCL` / `ERROR_ALREADY_EXISTS`; a collision (orphan of a crashed
-  same-PID process) is an error (`MORI_ERRCAT_EXISTS`), never worked
-  around by reuse.
+  (`mori_<pid>_<counter>`, `mori_region_name`). `mori_shm_create_heap`
+  uses `O_EXCL` / `ERROR_ALREADY_EXISTS`; a collision (orphan of a
+  crashed same-PID process) is an error (`MORI_ERRCAT_EXISTS`), never
+  worked around by reuse.
 - [`prune_shared()`](https://mori.r-lib.org/dev/reference/prune_shared.md)
   clears such orphans; it must run while the PID is free — a live
   process cannot reap its own names.
@@ -186,6 +190,20 @@ embedding mori layouts under their own SHM management:
   walk, fire the resolve hook; a non-NULL `keeper` composes behind a
   fresh chain terminus), `mori_release_now(x)` (fires a view’s armed
   release hook ahead of GC; once-only).
+- **Remote-leaf walk**:
+  `mori_morl_remote_walk(base, region_size, fn, ctx)` reports every
+  tag-33 identifier span in an MORL tree (recursing into nested list
+  children) to `fn`, once per occurrence — dedupe is the caller’s. `fn`
+  is a `mori_remote_fn(const char *id, int len, void *ctx)`: `id` points
+  into the region (not NUL-terminated; `len` is 1-255, the directory
+  entry’s identifier span). The lazy element reader counts a remote
+  leaf’s region only at first access — after the consumer-done signal —
+  so an embedder that wants the referenced regions held from the wrap
+  walks here and loans them itself (the refcount complement to the wire
+  hooks). Iterates with an explicit stack (depth is region-bounded, not
+  call-bounded) and validates every header and span it reads, raising
+  the lazy readers’ corrupt-or-newer errors. It resolves nothing itself
+  — no open, no path walk, no hooks fire.
 - **Hooks**: `mori_set_wire_hooks(emit, resolve)` — see Serialization
   Hooks. `mori_set_attrs_hooks(size, write, read)` — embedder
   attribute-blob encoding (e.g. the ‘I’ interchange stream); a zero
@@ -419,12 +437,12 @@ form for sub-objects).
 
 ### Keeper chain
 
-- **Host**: `mori_shm_create` mmaps (POSIX fd closed after mmap);
+- **Host**: `mori_shm_create_heap` mmaps (POSIX fd closed after mmap);
   `mori_make_result` splits ownership — ALTREP gets the mapping
   (`mori_shm_tag` extptr), the host unlink extptr is chained as its
   `prot`. Both finalizers run at GC; `R_RegisterCFinalizerEx(..., TRUE)`
   covers session exit.
-- **Consumer**: `mori_shm_open` maps read-only (never unlinks).
+- **Consumer**: `mori_shm_open_heap` maps read-only (never unlinks).
   Prefix-opened lists: shm extptr → root view extptr (index -1) → data1;
   `Elt` sub-lists chain through parent views. Path-form: intermediates
   are bare extptrs, only the leaf gets an ALTLIST. Element vec/str
@@ -447,7 +465,7 @@ form for sub-objects).
 ## Code Organization
 
 The view layer (`src/mori.h`, `src/altrep.c`, `src/serialize.c`) is
-vendored from mizu and the region layer (`src/shm.c`, `src/err_tls.c`,
+vendored from mizu and the region layer (`src/shm.c`,
 `src/mori_region.h`) from libmizu, both by `tools/vendor.sh` — all
 generated, never edited here; the bullets describe the vendored content.
 
@@ -469,15 +487,18 @@ generated, never edited here; the bullets describe the vendored content.
   (`mori_type_e`, `MORI_TYPE_INT64`) and NA sentinels, binding-tier
   constants (`MORI_ZC_FLOOR`, `MORI_OPEN_CACHE_MAX`,
   `MORI_INTEROP_MAGIC`, the language/capability registries), the
-  `mori_shm` struct + region API decls, and the carved layout helpers
-  the view layer delegates to (`mori_mors_geometry`,
-  `mori_morh_validity_set`, `mori_na_build`, and the bounds-checked MIZL
-  directory-entry reader `mori_morl_elem` with its `mori_morl_entry`
-  struct and `mori_ext_morl_ent` / `mori_ext_morl_tag_ok` /
-  `mori_ext_valid_ok` / `mori_ext_flags_known` / `mori_type_elt_size`
-  chain — `MORI_EXT_INLINE` static inlines over `MORI_REGION_ALIGN64`
-  arithmetic).
-- **src/shm.c** — platform SHM create/open/close + finalizers.
+  `mori_shm` struct + the region ext-tier decls (stack/heap create/open,
+  close, host release, reap — the public handle API is not vendored;
+  `MORI_COLD` is re-established in the preamble for shm.c’s cold paths),
+  and the carved layout helpers the view layer delegates to
+  (`mori_mors_geometry`, `mori_morh_validity_set`, `mori_na_build`, and
+  the bounds-checked MIZL directory-entry reader `mori_morl_elem` with
+  its `mori_morl_entry` struct and `mori_ext_morl_ent` /
+  `mori_ext_morl_tag_ok` / `mori_ext_valid_ok` / `mori_ext_flags_known`
+  / `mori_type_elt_size` chain — `MORI_EXT_INLINE` static inlines over
+  `MORI_REGION_ALIGN64` arithmetic).
+- **src/shm.c** — platform SHM create/open/close (stack/heap ext tier;
+  the public handle API is stripped at vendoring) + finalizers.
   `mori_shm_reap` enumerates the platform name source (`/dev/shm` on
   Linux; per-user registry dir on macOS — see Platform Notes),
   classifies by embedded PID (`mori_pid_alive`), feeds
@@ -487,9 +508,6 @@ generated, never edited here; the bullets describe the vendored content.
   is the single unlink seam. Errors: `mori_err_classify` maps native
   errno/GetLastError → `MORI_E*` **before** any close/unlink clobbers
   it; `mori_err_describe` → summary + remediation hint.
-- **src/err_tls.c** — the thread-local error slot behind
-  `mori_last_error_category` / `mori_last_error_message` for handle-free
-  entry points (regions, prune).
 - **src/serialize.c** — `mori_serialize_count` / `mori_serialize_into` /
   `mori_unserialize_from`: fallback MORL entries (`sexptype == 0`) and
   (unless the attrs hooks take them) attributes.
