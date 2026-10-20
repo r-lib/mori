@@ -13,6 +13,9 @@
 #define MORI_MAX_PATH        64                /* max indices in a path */
 #define MORI_IDENTIFIER_MAX  1024              /* parser input length cap */
 #define MORI_FORMAT_BUFLEN   1024              /* formatter stack buffer */
+#define MORI_REF_SPAN_MAX    255               /* tag-33 span, per the
+                                                       readers and the core's
+                                                       identifier grammar */
 
 /* External-pointer tag strings (installed once at init). */
 #define MORI_TAG_SHM   "mori_shm"
@@ -141,7 +144,11 @@ static inline int mori_flags_known(const unsigned char *base) {
 
 // altrep.c --------------------------------------------------------------------
 
-void mori_altrep_init(DllInfo *dll);
+/* The embedder roots a fresh NIL-filled VECSXP(MORI_CACHE_MAX) for the
+   session and hands it over; the layer borrows it (no preserve). fini
+   completes the unload: the individually preserved singletons' release. */
+void mori_altrep_init(DllInfo *dll, SEXP cache_wraps);
+void mori_altrep_fini(void);
 
 /* bit64-compatible int64: the class singleton (constructed and preserved in
    mori_altrep_init; its interned CHARSXP doubles as the probe's
@@ -220,6 +227,22 @@ SEXP mori_u64_rewrap(SEXP x);
    or COW-materialized view keeps the serialize path's wire hooks). */
 int mori_refable(SEXP x);
 SEXP mori_shm_name(SEXP x);
+/* The remote-leaf identifier: mori_shm_name(x) bounded to the
+   readers' tag-33 span. R_NilValue when the chain has no identifier OR
+   its span exceeds MORI_REF_SPAN_MAX — the same verdict as a broken
+   identifier, so every stage's broken-id fallback carries it (the tree
+   probe rejects; the layout's serialize branch writes the value). */
+SEXP mori_remote_id(SEXP x);
+/* The top-level REF gates' divergence check: 1 when x's current attribute
+   set and S4 bit equal the ones its identifier's resolve would apply —
+   the region's own — so the REF round-trips them; 0 only on a CONFIRMED
+   divergence. A locally re-attributed view must cross by value: a REF
+   resolves the region's attributes and would silently drop the local
+   edit. A corrupt or rewritten region and an unparseable blob keep the
+   REF (1): the resolve re-validates and raises there, the house style
+   for a bad region with or without the gate. id is
+   mori_shm_name(x)'s. */
+int mori_attrs_match(SEXP x, SEXP id);
 /* The region mapping a view's keeper chain anchors at — the shm_tag
    terminus. Borrowed (the view pins it); NULL on a malformed chain or a
    finalized mapping. Callers gate on mori_view_check: the chain and the
@@ -314,6 +337,15 @@ typedef SEXP (*mori_attrs_read_fn)(SEXP result, const unsigned char *buf,
 void mori_set_attrs_hooks(mori_attrs_size_fn size,
                                mori_attrs_write_fn write,
                                mori_attrs_read_fn read);
+/* The attrs blob's parse half, consulted by mori_attrs_match: decode
+   the embedder form to its attribute container (a value — no object is
+   applied to, so no landing conversion or shape validation runs). Only
+   the embedder form (first byte MORI_INTEROP_MAGIC) needs it; an
+   embedder that leaves it unset declines those blobs to the by-value
+   paths, R-serialize blobs comparing regardless. */
+typedef SEXP (*mori_attrs_parse_fn)(const unsigned char *buf,
+                                         size_t size);
+void mori_set_attrs_parse_hook(mori_attrs_parse_fn parse);
 
 // Alignment macro and the MORS string block geometry -------------------------
 

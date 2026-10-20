@@ -55,6 +55,14 @@ void mori_set_attrs_hooks(mori_attrs_size_fn size,
   mori_attrs_read_hook = read;
 }
 
+/* Embedder attribute-blob parse hook (mori.h): mori_attrs_match's
+   decode of the embedder form to a comparable container. */
+static mori_attrs_parse_fn mori_attrs_parse_hook;
+
+void mori_set_attrs_parse_hook(mori_attrs_parse_fn parse) {
+  mori_attrs_parse_hook = parse;
+}
+
 /* The attr blob's size: the embedder's encoding when the hooks are set
    and accept the set (a nonzero return), else R_Serialize. x is the
    attributed object (the hook qualifies it); attrs its serialized-form
@@ -704,8 +712,7 @@ SEXP mori_u64_rewrap(SEXP x) {
   mori_vec *src = (mori_vec *) R_ExternalPtrAddr(d1);
   mori_u64 *v = (mori_u64 *) malloc(sizeof(mori_u64));
   if (v == NULL) Rf_error("mori: allocation failure");
-  v->owned = src->owned;                /* the release record transfers */
-  src->owned.release = NULL;
+  v->owned = src->owned;
   v->data = src->data;
   v->length = src->length;
   v->index = src->index;
@@ -713,6 +720,8 @@ SEXP mori_u64_rewrap(SEXP x) {
   SEXP ptr = PROTECT(R_MakeExternalPtr(v, mori_owned_tag,
                                        R_ExternalPtrProtected(d1)));
   R_RegisterCFinalizerEx(ptr, mori_u64_finalizer, TRUE);
+  /* the release record transfers only once v's finalizer owns it */
+  src->owned.release = NULL;
   SEXP result = R_new_altrep(mori_u64_class, ptr, R_NilValue);
   UNPROTECT(1);
   return result;
@@ -1198,7 +1207,8 @@ static SEXP mori_make_result(mori_shm *shm) {
    identifier then reads stale-but-valid pages instead of erroring "not
    found") — unreachable in-protocol, where the sender's keeper pins the
    region through the read. */
-static SEXP mori_cache_wraps;  /* VECSXP(MORI_CACHE_MAX), preserved at init */
+static SEXP mori_cache_wraps;  /* VECSXP(MORI_CACHE_MAX), borrowed:
+                                       rooted by the embedder for the session */
 static char mori_cache_names[MORI_CACHE_MAX][MORI_NAME_MAX];
 static uint8_t mori_cache_len[MORI_CACHE_MAX];   /* 0 = empty slot */
 static uint64_t mori_cache_stamp[MORI_CACHE_MAX];
@@ -1380,7 +1390,7 @@ static size_t mori_nested_size(SEXP x, int *ok, int foreign,
     size_t elt_size;
 
     if (mori_refable(elt)) {
-      SEXP id = PROTECT(mori_shm_name(elt));
+      SEXP id = PROTECT(mori_remote_id(elt));
       if (id != R_NilValue) {
         /* a remote leaf (F2.5): the identifier span, no local bytes — the
            bitmap reserve is the local leaves', the table reserve any
@@ -1388,8 +1398,9 @@ static size_t mori_nested_size(SEXP x, int *ok, int foreign,
         elt_size = (size_t) LENGTH(STRING_ELT(id, 0));
         any_remote = 1;
       } else {
-        /* a view whose identifier broke: not remote-capable, and the copy
-           path must not duplicate a wire identity either */
+        /* a view whose identifier broke or is past the readers' span cap:
+           not remote-capable, and the copy path must not duplicate a wire
+           identity either */
         if (ok != NULL) { *ok = 0; UNPROTECT(1); return 0; }
         elt_size = mori_serialize_count(elt);
       }
@@ -1469,7 +1480,7 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
 
     int is_remote = 0, broken_ref = 0;
     if (mori_refable(elt)) {
-      SEXP id = PROTECT(mori_shm_name(elt));
+      SEXP id = PROTECT(mori_remote_id(elt));
       int64_t rlength = 0, rattrs = 0;
       int rna_free = 0;
       if (id != R_NilValue) {
@@ -1493,10 +1504,10 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
         if (mori_emit_hook != NULL) mori_emit_hook(elt);
         is_remote = 1;
       } else {
-        /* a broken identifier (an over-deep chain): the embedder probe
-           rejects these, so only the host path meets them — its size pass
-           counted the serialize form, and the serialize branch below
-           writes it */
+        /* a broken identifier (an over-deep chain, or one past the
+           readers' span cap): the embedder probe rejects these, so only
+           the host path meets them — its size pass counted the serialize
+           form, and the serialize branch below writes it */
         broken_ref = 1;
       }
       UNPROTECT(1);
@@ -1736,15 +1747,18 @@ static int mori_na_present(int type, const void *src, uint64_t n) {
   case REALSXP: {
     const uint64_t *v = (const uint64_t *) src;
     for (uint64_t i = 0; i < n; i++)
-      /* one shift + compare in the hot loop: a NaN or Inf exponent
-         gates the precise payload test */
-      if ((v[i] >> 52) == 0x7FF && mori_ext_na_real_bits(v[i])) return 1;
+      /* shift + mask + compare in the hot loop, sign-masked exactly as
+         mori_ext_na_real_bits: a NaN or Inf exponent of either sign
+         (-NA_real_ flips the sign bit) gates the precise payload test */
+      if (((v[i] >> 52) & 0x7FF) == 0x7FF && mori_ext_na_real_bits(v[i]))
+        return 1;
     return 0;
   }
   case CPLXSXP: {
     const uint64_t *v = (const uint64_t *) src;
     for (uint64_t i = 0; i < 2 * n; i++)
-      if ((v[i] >> 52) == 0x7FF && mori_ext_na_real_bits(v[i])) return 1;
+      if (((v[i] >> 52) & 0x7FF) == 0x7FF && mori_ext_na_real_bits(v[i]))
+        return 1;
     return 0;
   }
   case MORI_TYPE_INT64: {
@@ -2139,6 +2153,203 @@ int mori_refable(SEXP x) {
   return !ANY_ATTRIB(x);
 }
 
+/* A pairlist attribute set as a named list, for cross-form comparison
+   (a region blob written under another R version's container form, the
+   embedder form's dict): VECSXP passes through. */
+static SEXP mori_attrs_as_list(SEXP attrs) {
+  if (attrs == R_NilValue || TYPEOF(attrs) == VECSXP) return attrs;
+  R_xlen_t n = 0;
+  for (SEXP a = attrs; a != R_NilValue; a = CDR(a)) n++;
+  SEXP out = PROTECT(Rf_allocVector(VECSXP, n));
+  SEXP names = PROTECT(Rf_allocVector(STRSXP, n));
+  R_xlen_t i = 0;
+  for (SEXP a = attrs; a != R_NilValue; a = CDR(a), i++) {
+    SET_VECTOR_ELT(out, i, CAR(a));
+    SET_STRING_ELT(names, i, PRINTNAME(TAG(a)));
+  }
+  Rf_setAttrib(out, R_NamesSymbol, names);
+  UNPROTECT(2);
+  return out;
+}
+
+/* The blob decode, contained: a blob the region's own write produced
+   parses here as it did at wrap; anything else (a peer-rewritten entry,
+   a corrupt region) declines to the by-value paths rather than raise
+   out of a stage. */
+typedef struct {
+  const unsigned char *buf;
+  size_t size;
+  int jumped;
+} mori_aparse;
+
+static SEXP mori_aparse_do(void *data) {
+  mori_aparse *a = (mori_aparse *) data;
+  if (a->buf[0] == MORI_INTEROP_MAGIC && mori_attrs_parse_hook != NULL)
+    return mori_attrs_parse_hook(a->buf, a->size);
+  return mori_unserialize_from((unsigned char *) a->buf, a->size);
+}
+
+static void mori_aparse_cleanup(void *data, Rboolean jump) {
+  if (jump) ((mori_aparse *) data)->jumped = 1;
+}
+
+/* A named-list attribute set's key lookup. */
+static int mori_attrs_list_has(SEXP attrs_list, const char *key) {
+  if (TYPEOF(attrs_list) != VECSXP) return 0;
+  SEXP names = Rf_getAttrib(attrs_list, R_NamesSymbol);
+  if (names == R_NilValue) return 0;
+  for (R_xlen_t i = 0; i < XLENGTH(attrs_list); i++)
+    if (strcmp(CHAR(STRING_ELT(names, i)), key) == 0) return 1;
+  return 0;
+}
+
+/* reg_l with the integer64 class appended (the singleton — the list
+   gains no fresh value). */
+static SEXP mori_attrs_add_int64_class(SEXP reg_l) {
+  SEXP onames = PROTECT(Rf_getAttrib(reg_l, R_NamesSymbol));
+  const R_xlen_t n = XLENGTH(reg_l);
+  SEXP out = PROTECT(Rf_allocVector(VECSXP, n + 1));
+  SEXP names = PROTECT(Rf_allocVector(STRSXP, n + 1));
+  for (R_xlen_t i = 0; i < n; i++) {
+    SET_VECTOR_ELT(out, i, VECTOR_ELT(reg_l, i));
+    SET_STRING_ELT(names, i, STRING_ELT(onames, i));
+  }
+  SET_VECTOR_ELT(out, n, mori_int64_class);
+  SET_STRING_ELT(names, n, Rf_mkChar("class"));
+  Rf_setAttrib(out, R_NamesSymbol, names);
+  UNPROTECT(3);
+  return out;
+}
+
+/* The parsed blob as the resolve would apply it: a class-only int64
+   root's class rides the wire tag, not the blob — the tag re-applies it
+   at the wrap unless the blob names a class of its own. */
+static SEXP mori_attrs_resolve_form(SEXP reg, int int64_tag) {
+  SEXP reg_l = PROTECT(mori_attrs_as_list(reg));
+  SEXP out = reg_l;
+  if (int64_tag && !mori_attrs_list_has(reg_l, "class"))
+    out = mori_attrs_add_int64_class(reg_l);
+  UNPROTECT(1);
+  return out;
+}
+
+/* mori.h's REF-gate divergence check. The walk mirrors the resolve
+   geometry (mori_open_vector/string/list, the open_elem tail):
+   root headers for a bare name, the terminal directory entry for a
+   path, a nested list's attrs inside its child MORL. Only a CONFIRMED
+   divergence declines: a corrupt or rewritten region keeps the REF
+   (the resolve re-validates and raises there, as it did without the
+   gate), and an unparseable blob does likewise. */
+int mori_attrs_match(SEXP x, SEXP id) {
+  char name[MORI_NAME_MAX];
+  int32_t path[MORI_MAX_PATH];
+  int path_len = 0;
+  if (mori_parse_id(CHAR(STRING_ELT(id, 0)), name, sizeof(name),
+                         path, &path_len) < 0)
+    return 1;
+  mori_shm *shm = mori_chain_shm(x);
+  if (shm == NULL) return 1;
+  const unsigned char *base = (const unsigned char *) shm->addr;
+  const int64_t region_size = (int64_t) shm->size;
+  if (region_size < MORI_HEADER_SIZE) return 1;
+
+  const unsigned char *blob = NULL;
+  int64_t blob_size = 0;
+  int s4 = 0;
+  if (path_len == 0) {
+    uint32_t magic, flags;
+    memcpy(&magic, base, 4);
+    memcpy(&flags, base + MORI_FLAGS_OFF, 4);
+    s4 = (flags & MORI_FLAG_S4) != 0;
+    if (magic == MORI_MAGIC_VEC) {
+      int32_t sexptype;
+      int64_t length, attrs_size;
+      memcpy(&sexptype, base + 4, 4);
+      memcpy(&length, base + 8, 8);
+      memcpy(&attrs_size, base + 16, 8);
+      const int64_t elt = (int64_t) mori_sizeof_elt(sexptype);
+      if (elt == 0 || length < 0 ||
+          length > (region_size - MORI_HEADER_SIZE) / elt)
+        return 1;
+      const int64_t off = MORI_HEADER_SIZE + length * elt;
+      if (mori_oob(off, attrs_size, region_size)) return 1;
+      blob = base + off;
+      blob_size = attrs_size;
+    } else if (magic == MORI_MAGIC_STR) {
+      int32_t attrs32;
+      int64_t str_size;
+      memcpy(&attrs32, base + 4, 4);
+      memcpy(&str_size, base + 16, 8);
+      const int64_t off = MORI_HEADER_SIZE + str_size;
+      if (mori_oob(off, (int64_t) attrs32, region_size)) return 1;
+      blob = base + off;
+      blob_size = attrs32;
+    } else if (magic == MORI_MAGIC_LIST) {
+      int64_t attrs_offset, attrs_size;
+      memcpy(&attrs_offset, base + 8, 8);
+      memcpy(&attrs_size, base + 16, 8);
+      if (mori_oob(attrs_offset, attrs_size, region_size)) return 1;
+      blob = base + attrs_offset;
+      blob_size = attrs_size;
+    } else {
+      return 1;
+    }
+  } else {
+    const unsigned char *leaf;
+    mori_morl_entry ent;
+    if (mori_path_entry(base, region_size, path, path_len, &leaf,
+                             &ent) != 0)
+      return 1;
+    s4 = (ent.sexptype & (int32_t) MORI_ELEM_S4) != 0;
+    const int32_t tag = ent.sexptype & ~(int32_t) MORI_ELEM_S4;
+    if (tag == MORI_TYPE_VEC) {
+      /* a nested list's attrs live inside its child MORL's header */
+      if (ent.data_offset < 0 || ent.data_size < MORI_HEADER_SIZE)
+        return 1;
+      const unsigned char *child = leaf + ent.data_offset;
+      uint32_t cmagic;
+      memcpy(&cmagic, child, 4);
+      if (cmagic != MORI_MAGIC_LIST) return 1;
+      int64_t attrs_offset, attrs_size;
+      memcpy(&attrs_offset, child + 8, 8);
+      memcpy(&attrs_size, child + 16, 8);
+      if (mori_oob(attrs_offset, attrs_size, ent.data_size)) return 1;
+      blob = child + attrs_offset;
+      blob_size = attrs_size;
+    } else if (tag == 0 || tag == MORI_TAG_REF) {
+      return 1;   /* a serialized leaf or a remote hop: never this id */
+    } else {
+      if (ent.attrs_size < 0 || ent.attrs_size > ent.data_size) return 1;
+      blob = leaf + ent.data_offset + ent.data_size - ent.attrs_size;
+      blob_size = ent.attrs_size;
+    }
+  }
+  if ((Rf_isS4(x) != 0) != s4) return 0;
+  /* an empty blob: only an unadorned view, or a class-only int64 (its
+     class riding the wire tag), round-trips */
+  if (blob_size == 0) return mori_is_int64_any(x) || !ANY_ATTRIB(x);
+  if (!ANY_ATTRIB(x)) return 0;
+
+  mori_aparse a = { blob, (size_t) blob_size, 0 };
+  SEXP cont = PROTECT(R_MakeUnwindCont());
+  SEXP reg = R_UnwindProtect(mori_aparse_do, &a,
+                             mori_aparse_cleanup, &a, cont);
+  if (a.jumped) {
+    UNPROTECT(1);
+    return 1;
+  }
+  PROTECT(reg);
+  SEXP reg_l = PROTECT(mori_attrs_resolve_form(
+    reg, mori_is_int64_any(x)
+  ));
+  SEXP cur = PROTECT(mori_get_attrs_for_serialize(x));
+  SEXP cur_l = PROTECT(mori_attrs_as_list(cur));
+  const int eq =
+    R_compute_identical(cur_l, reg_l, IDENT_USE_CLOENV) == TRUE;
+  UNPROTECT(5);
+  return eq;
+}
+
 SEXP mori_is_shared(SEXP x) {
   return Rf_ScalarLogical(mori_view_check(x));
 }
@@ -2185,6 +2396,14 @@ SEXP mori_shm_name(SEXP x) {
                         buf, sizeof(buf)) != 0)
     return R_NilValue;
   return Rf_mkString(buf);
+}
+
+SEXP mori_remote_id(SEXP x) {
+  SEXP id = mori_shm_name(x);
+  if (id == R_NilValue ||
+      LENGTH(STRING_ELT(id, 0)) > MORI_REF_SPAN_MAX)
+    return R_NilValue;
+  return id;
 }
 
 /* Reap shared memory regions orphaned by a dead creating process. Returns
@@ -2515,7 +2734,8 @@ static SEXP mori_unwrap_remote(unsigned char *base, int64_t region_size,
 
   /* The core's tag-33 entry branch (mori_ext_morl_ent), restated: the S4
      bit clear, the identifier span 1-255 bytes, the length non-negative. */
-  if (s4 || length < 0 || data_size < 1 || data_size > 255)
+  if (s4 || length < 0 || data_size < 1 ||
+      data_size > MORI_REF_SPAN_MAX)
     Rf_error("mori: invalid MORL remote leaf — corrupt or newer region");
 
   /* The entry's own NA claim: the header pair, or its validity-table row.
@@ -2639,7 +2859,7 @@ void mori_morl_remote_walk(unsigned char *base, int64_t region_size,
           (entry.data_offset & 63) != 0)
         MORI_WALK_FAIL("mori: invalid element data");
       if (tag == MORI_TAG_REF) {
-        if (entry.data_size < 1 || entry.data_size > 255)
+        if (entry.data_size < 1 || entry.data_size > MORI_REF_SPAN_MAX)
           MORI_WALK_FAIL(
             "mori: invalid MORL remote leaf — corrupt or newer region");
         fn((const char *) f.base + entry.data_offset,
@@ -2718,21 +2938,22 @@ static R_altrep_class_t mori_register_vec_class(mori_make_class_fn make,
   return cls;
 }
 
-void mori_altrep_init(DllInfo *dll) {
+void mori_altrep_init(DllInfo *dll, SEXP cache_wraps) {
 
   mori_shm_tag = Rf_install(MORI_TAG_SHM);
   mori_host_tag = Rf_install(MORI_TAG_HOST);
   mori_owned_tag = Rf_install(MORI_TAG_OWNED);
 
   /* the integer64 class singleton: a STRSXP does not self-root like an
-     interned tag, so preserve it explicitly (the layer has no fini) */
+     interned tag, so preserve it explicitly (released at fini) */
   mori_int64_class = Rf_mkString("integer64");
   R_PreserveObject(mori_int64_class);
 
-  /* the consumer-mapping cache's wraps vector (fresh VECSXP is NIL-filled;
-     a name_len of 0 marks an empty slot) */
-  mori_cache_wraps = Rf_allocVector(VECSXP, MORI_CACHE_MAX);
-  R_PreserveObject(mori_cache_wraps);
+  /* the consumer-mapping cache's wraps vector, borrowed: the embedder roots
+     a fresh NIL-filled VECSXP(MORI_CACHE_MAX) for the session (mizu:
+     the precious root, MIZU_PRIV_VIEW_WRAPS; a name_len of 0 marks an empty
+     slot) */
+  mori_cache_wraps = cache_wraps;
 
   /* ALTLIST class */
   mori_list_class = R_make_altlist_class("mori_list", "mori", dll);
@@ -2798,4 +3019,8 @@ void mori_altrep_init(DllInfo *dll) {
   R_set_altrep_Serialized_state_method(mori_string_class,
                                        mori_string_Serialized_state);
   R_set_altrep_Unserialize_method(mori_string_class, mori_string_Unserialize);
+}
+
+void mori_altrep_fini(void) {
+  R_ReleaseObject(mori_int64_class);
 }

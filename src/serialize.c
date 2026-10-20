@@ -48,7 +48,10 @@ size_t mori_serialize_into(unsigned char *dst, SEXP object) {
 static void mori_read_bytes(R_inpstream_t stream, void *dst, int len) {
   mori_buf *buf = (mori_buf *) stream->data;
   size_t n = (size_t) len;
-  if (buf->cur + n > buf->len) n = buf->len - buf->cur;
+  /* a truncated stream fails the read: clamping would pad R_Unserialize's
+     destination with uninitialized bytes, parsed as lengths and offsets */
+  if (buf->cur + n > buf->len)
+    Rf_error("mori: corrupt payload stream");
   memcpy(dst, buf->buf + buf->cur, n);
   buf->cur += n;
 }

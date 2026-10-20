@@ -16,8 +16,14 @@ static const R_CallMethodDef CallEntries[] = {
   {NULL, NULL, 0}
 };
 
+/* The consumer-mapping cache's wraps vector: the vendored view layer
+   borrows it, so mori roots it for the session. */
+static SEXP cache_wraps;
+
 void R_init_mori(DllInfo *dll) {
   R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
   R_useDynamicSymbols(dll, FALSE);
-  mori_altrep_init(dll);
+  cache_wraps = Rf_allocVector(VECSXP, MORI_CACHE_MAX);
+  R_PreserveObject(cache_wraps);
+  mori_altrep_init(dll, cache_wraps);
 }

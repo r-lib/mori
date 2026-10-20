@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-MIZU_PIN="50dd5fddb4b7ee9d44850acadbac30b5ae9d3823"    # mizu: Stop vendoring libmizu ext.c (the FFI-only accessor half)
+MIZU_PIN="5515fc0bc46728c00516cf32164c83614a9aa78c"    # mizu: Move mutable and cached package state to a private precious root
 LIBMIZU_PIN="db8ae7fe1457998e538427ac708f0f38cf330596" # libmizu: Accept no-sizes string_view exports in mizu_arrow_str_at
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
