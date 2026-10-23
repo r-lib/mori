@@ -17,6 +17,15 @@
 #   src/altrep.c       mizu src/view.c
 #   src/serialize.c    mizu src/serialize.c
 #
+# The view layer also strips the embedder-only surface mori never calls (see
+# the carve block below): the u64 landing class, the attrs interchange
+# parse/match island, the hook setters, the remote-leaf directory walk,
+# mori_release_now, mori_altrep_fini, the exported layout wrappers, and the
+# strict mori_is_int64 — dead code that would otherwise tax every coverage
+# run. The interleaved foreign/ok/sp branches inside live functions cannot
+# be carved; they are excluded from coverage instead
+# (tools/coverage-exclusions.R).
+#
 # Usage: tools/vendor.sh [--region-only|--view-only] [--mizu ref] [--libmizu ref]
 #   --mizu ref      tag, branch, or full commit SHA for the view layer
 #                   (default: the pin)
@@ -115,6 +124,25 @@ filter_decls() {
                           { printf "%s", cbuf; cbuf = ""; print }
     END                   { printf "%s", cbuf }
   '
+}
+
+# strip_range <file> <start-re> <end-re>: delete the lines [start, end) —
+# the end anchor's line is kept. Both anchors must be present (fail-safe,
+# same contract as carve()).
+strip_range() {
+  grep -qE -- "$2" "$1" || { echo "carve: start anchor missing in $1: $2" >&2; exit 1; }
+  grep -qE -- "$3" "$1" || { echo "carve: end anchor missing in $1: $3" >&2; exit 1; }
+  S="$2" E="$3" awk '
+    $0 ~ ENVIRON["S"] { inb = 1 }
+    inb && $0 ~ ENVIRON["E"] { inb = 0; print; next }
+    !inb { print }
+  ' "$1" > "$1.carve" && mv "$1.carve" "$1"
+}
+
+# strip_line <file> <line-re>: delete the single matching line.
+strip_line() {
+  grep -qE -- "$2" "$1" || { echo "carve: line anchor missing in $1: $2" >&2; exit 1; }
+  S="$2" awk '$0 !~ ENVIRON["S"]' "$1" > "$1.carve" && mv "$1.carve" "$1"
 }
 
 # --- The view layer's upstream is resolved first: the region layer's default
@@ -427,6 +455,57 @@ if [ "$do_view" -eq 1 ]; then
     "$DEST/mori.h" "$DEST/altrep.c" "$DEST/serialize.c"
 
   rm -f "$DEST/mori.h.bak" "$DEST/altrep.c.bak" "$DEST/serialize.c.bak"
+
+  # Strip the embedder-only surface mori never calls (dead code — see the
+  # header note). Anchors are the post-substitution text. The hook typedefs
+  # and variables stay: live code reads them (they are simply never set).
+
+  # altrep.c: the hook setters (wire/open/attrs triple/attrs parse), the
+  # strict integer64 gate (the _any half serves the layouts), the u64
+  # landing class (section, class handle, registration), the exported
+  # layout wrappers (mori_create drives mori_layout_size_impl /
+  # mori_layout_write directly), the attrs interchange parse/match island,
+  # mori_release_now, the remote-leaf directory walk, mori_altrep_fini.
+  strip_range "$DEST/altrep.c" '^void mori_set_wire_hooks\(' '^/\* Embedder attribute-blob hooks'
+  strip_range "$DEST/altrep.c" '^void mori_set_attrs_hooks\(' '^/\* The attr blob'
+  strip_range "$DEST/altrep.c" '^int mori_is_int64\(SEXP x\) \{$' '^/\* The ALTREP-tolerant half'
+  strip_line  "$DEST/altrep.c" '^R_altrep_class_t mori_u64_class;$'
+  strip_range "$DEST/altrep.c" '^// ALTREP uint64 view' '^// ALTSTRING methods'
+  strip_range "$DEST/altrep.c" '^size_t mori_layout_size\(SEXP' '^size_t mori_layout_write\('
+  strip_range "$DEST/altrep.c" '^/\* A pairlist attribute set as a named list' '^SEXP mori_is_shared\('
+  strip_range "$DEST/altrep.c" '^/\* Fire a view.s armed release record now' '^// Remote-leaf directory walk'
+  strip_range "$DEST/altrep.c" '^// Remote-leaf directory walk' '^/\* Vec and list classes'
+  strip_range "$DEST/altrep.c" '^  /\* the converting uint64 class' '^  /\* ALTSTRING class \*/'
+  grep -q '^void mori_altrep_fini(' "$DEST/altrep.c" || { echo "carve: fini anchor missing in altrep.c" >&2; exit 1; }
+  sed -i.carve -e '\|^void mori_altrep_fini(|,$d' "$DEST/altrep.c" && rm -f "$DEST/altrep.c.carve"
+
+  # mori.h: the matching declarations (doc comment blocks go with them).
+  # Kept: the hook typedefs and doc comments (the variables are declared
+  # with them), MORI_CACHE_MAX, and the layout comment documenting
+  # mori_layout_write's contract.
+  strip_line  "$DEST/mori.h" '^void mori_altrep_fini\(void\);$'
+  strip_range "$DEST/mori.h" '^/\* The embedder roots a fresh NIL-filled' '^void mori_altrep_init'
+  strip_line  "$DEST/mori.h" '^int mori_is_int64\(SEXP x\);$'
+  strip_line  "$DEST/mori.h" '^size_t mori_layout_size\(SEXP x, int foreign\);$'
+  strip_range "$DEST/mori.h" '^/\* The size pass with the string leaves pre-measured' '^/\* View introspection'
+  strip_range "$DEST/mori.h" '^/\* The converting uint64 class' '^/\* A view that would REF top-level'
+  strip_range "$DEST/mori.h" '^/\* The top-level REF gates. divergence check' '^/\* The region mapping a view.s keeper chain'
+  strip_range "$DEST/mori.h" '^/\* Fire a view.s armed release record now' '^/\* The remote-leaf directory walk'
+  strip_range "$DEST/mori.h" '^/\* The remote-leaf directory walk' '^/\* Embedder wire hooks'
+  strip_line  "$DEST/mori.h" '^void mori_set_wire_hooks\('
+  strip_line  "$DEST/mori.h" '^void mori_set_open_hook\('
+  strip_range "$DEST/mori.h" '^void mori_set_attrs_hooks\(' '^// Alignment macro'
+
+  # The mori_sump comment names the carved wrapper: point it at the pass.
+  sed -i.carve -e "s|sums' cursor (mori_layout_size_sums)|sums' cursor (the pre-measured size pass)|" \
+    "$DEST/altrep.c" && rm -f "$DEST/altrep.c.carve"
+
+  # The carve gate: no stripped symbol may remain anywhere in the layer.
+  if grep -nE 'mori_u64|mori_attrs_match|mori_aparse|mori_attrs_as_list|mori_attrs_list_has|mori_attrs_add_int64_class|mori_attrs_resolve_form|mori_attrs_parse_hook|mori_attrs_parse_fn|mori_set_wire_hooks|mori_set_open_hook|mori_set_attrs_hooks|mori_morl_remote_walk|mori_remote_fn|mori_release_now|mori_altrep_fini|mori_layout_size_sums|mori_layout_size\(|mori_is_int64\(' \
+      "$DEST/mori.h" "$DEST/altrep.c"; then
+    echo "vendor: FAIL — embedder-surface remnants above (view layer)" >&2
+    exit 1
+  fi
 
   # The gate: no mizu-namespace reference may remain (a missed identifier
   # fails loud at link time; a missed string forks the namespace silently).

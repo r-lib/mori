@@ -144,18 +144,13 @@ static inline int mori_flags_known(const unsigned char *base) {
 
 // altrep.c --------------------------------------------------------------------
 
-/* The embedder roots a fresh NIL-filled VECSXP(MORI_CACHE_MAX) for the
-   session and hands it over; the layer borrows it (no preserve). fini
-   completes the unload: the individually preserved singletons' release. */
 void mori_altrep_init(DllInfo *dll, SEXP cache_wraps);
-void mori_altrep_fini(void);
 
 /* bit64-compatible int64: the class singleton (constructed and preserved in
    mori_altrep_init; its interned CHARSXP doubles as the probe's
    comparator) and the class-only gate — a REALSXP whose entire attribute
    set is class = "integer64". */
 extern SEXP mori_int64_class;
-int mori_is_int64(SEXP x);
 int mori_is_int64_any(SEXP x);
 
 /* SHM extptr finalizers, defined alongside the wrap constructors that
@@ -208,35 +203,11 @@ static inline SEXP mori_restore_tail(SEXP view, unsigned char *blob,
    expanding the sender's vector) and the write builds the
    validity-bitmap section (mizu.h's [40-47]/[48-55] header words) fused
    after each atomic node's copy, returning the actual bytes used. */
-size_t mori_layout_size(SEXP x, int foreign);
 size_t mori_layout_write(unsigned char *base, SEXP x, int foreign);
-/* The size pass with the string leaves pre-measured: sums carries every
-   STRSXP leaf's body size (the mori_string_data_size the pass would
-   compute) in the tree's pre-order, letting an eligibility walk that
-   already visited the leaves retire this pass's string walks. One sum is
-   consumed per string leaf; a count that runs out or has leftovers is a
-   recording bug — the return is 0, indistinguishable from a veto, so the
-   caller simply falls back to mori_layout_size. The walk's own
-   business (attrs blobs, serialized leaves, the validity reserve) is
-   unchanged. */
-size_t mori_layout_size_sums(SEXP x, int foreign, const size_t *sums,
-                                  size_t nsums);
-
 /* View introspection: C-level is_shared, the identifier formatter, the
    identifier parser, and a path walk over an already-open region (keeper
    flows to the returned view's chain). */
 int mori_view_check(SEXP x);
-/* The converting uint64 class (REALSXP, registered beside the vec
-   classes): the landing for a verbatim uint64 frame column (an INT64
-   leaf whose blob is exactly {u64 = TRUE}, MIZU_CAP_MORL_U64V). The
-   region's u64 lanes stay authoritative — the converted doubles cache
-   outside data2, so an exact-export borrow keyed on data2 survives
-   read-only touches; the writable Dataptr COWs the converted values
-   into data2 and releases the loan. mori_u64_rewrap re-wraps an
-   INT64 leaf view as the class over the same keeper and region span
-   (the blob hook's marker landing), taking over its release record. */
-extern R_altrep_class_t mori_u64_class;
-SEXP mori_u64_rewrap(SEXP x);
 /* A view that would REF top-level, unadorned — the remote-leaf writer's
    gate (the REF tier's predicate plus no local attributes: a remote leaf
    carries the referenced column's own attributes, so a locally attributed
@@ -249,16 +220,6 @@ SEXP mori_shm_name(SEXP x);
    identifier, so every stage's broken-id fallback carries it (the tree
    probe rejects; the layout's serialize branch writes the value). */
 SEXP mori_remote_id(SEXP x);
-/* The top-level REF gates' divergence check: 1 when x's current attribute
-   set and S4 bit equal the ones its identifier's resolve would apply —
-   the region's own — so the REF round-trips them; 0 only on a CONFIRMED
-   divergence. A locally re-attributed view must cross by value: a REF
-   resolves the region's attributes and would silently drop the local
-   edit. A corrupt or rewritten region and an unparseable blob keep the
-   REF (1): the resolve re-validates and raises there, the house style
-   for a bad region with or without the gate. id is
-   mori_shm_name(x)'s. */
-int mori_attrs_match(SEXP x, SEXP id);
 /* The region mapping a view's keeper chain anchors at — the shm_tag
    terminus. Borrowed (the view pins it); NULL on a malformed chain or a
    finalized mapping. Callers gate on mori_view_check: the chain and the
@@ -290,23 +251,6 @@ SEXP mori_walk_path(unsigned char *base, int64_t region_size,
    R_NilValue on a malformed identifier; a gone region errors in the
    open. */
 SEXP mori_resolve_id(const char *id, SEXP keeper);
-/* Fire a view's armed release record now, ahead of the GC (once-only: a
-   no-op when unarmed or already fired). For a deterministic-release
-   protocol — the caller's invariant is that nothing live can still read
-   the pages without its own count. */
-void mori_release_now(SEXP x);
-
-/* The remote-leaf directory walk: report every tag-33 identifier span in
-   an MORL tree (recursively) to fn, once per occurrence (dedupe is the
-   caller's). The lazy element reader counts a remote leaf's region only
-   at first access — after the consumer-done signal — so an embedder that
-   wants the referenced regions held from the wrap walks here and loans
-   them itself. Validates every header and span it reads, raising the
-   lazy readers' corrupt-or-newer errors. */
-typedef void (*mori_remote_fn)(const char *id, int len, void *ctx);
-void mori_morl_remote_walk(unsigned char *base, int64_t region_size,
-                                mori_remote_fn fn, void *ctx);
-
 /* Embedder wire hooks (optional; set once at embedder load): `emit` fires
    from the Serialized_state methods when an identifier — not a
    materialization — is emitted for a view (the holder set then widens
@@ -316,7 +260,6 @@ void mori_morl_remote_walk(unsigned char *base, int64_t region_size,
    flag regions on escape and to count remote references on arrival. */
 typedef void (*mori_emit_hook_fn)(SEXP view);
 typedef void (*mori_resolve_hook_fn)(SEXP view, mori_shm *shm);
-void mori_set_wire_hooks(mori_emit_hook_fn emit, mori_resolve_hook_fn resolve);
 
 /* Embedder open hook (optional; set once at embedder load): the identifier
    resolve paths dedupe consumer mappings through a process-global
@@ -330,7 +273,6 @@ void mori_set_wire_hooks(mori_emit_hook_fn emit, mori_resolve_hook_fn resolve);
    the MORI_ prefix renames to MORI_CACHE_MAX and cannot collide. */
 #define MORI_CACHE_MAX 16
 typedef mori_shm *(*mori_open_hook_fn)(const char *name);
-void mori_set_open_hook(mori_open_hook_fn hook);
 
 /* Embedder attribute-blob hooks (optional; set once at embedder load, as
    a triple). When set, the layout writer offers every non-empty
@@ -350,19 +292,6 @@ typedef size_t (*mori_attrs_size_fn)(SEXP x);
 typedef size_t (*mori_attrs_write_fn)(unsigned char *dst, SEXP x);
 typedef SEXP (*mori_attrs_read_fn)(SEXP result, const unsigned char *buf,
                                         size_t size);
-void mori_set_attrs_hooks(mori_attrs_size_fn size,
-                               mori_attrs_write_fn write,
-                               mori_attrs_read_fn read);
-/* The attrs blob's parse half, consulted by mori_attrs_match: decode
-   the embedder form to its attribute container (a value — no object is
-   applied to, so no landing conversion or shape validation runs). Only
-   the embedder form (first byte MORI_INTEROP_MAGIC) needs it; an
-   embedder that leaves it unset declines those blobs to the by-value
-   paths, R-serialize blobs comparing regardless. */
-typedef SEXP (*mori_attrs_parse_fn)(const unsigned char *buf,
-                                         size_t size);
-void mori_set_attrs_parse_hook(mori_attrs_parse_fn parse);
-
 // Alignment macro and the MORS string block geometry -------------------------
 
 #define MORI_ALIGN64(x) (((x) + 63) & ~(size_t)63)

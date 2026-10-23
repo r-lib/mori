@@ -18,7 +18,6 @@ static R_altrep_class_t mori_logical_class;
 static R_altrep_class_t mori_raw_class;
 static R_altrep_class_t mori_complex_class;
 static R_altrep_class_t mori_string_class;
-R_altrep_class_t mori_u64_class;
 static SEXP mori_shm_tag;    /* tag on SHM mapping extptrs (addr is mori_shm *) */
 static SEXP mori_host_tag;   /* tag on host-only unlink extptrs (addr is mori_shm *) */
 static SEXP mori_owned_tag;  /* tag on every view ALTREP data1 extptr; addr type dispatched via TYPEOF(x) */
@@ -32,36 +31,11 @@ static mori_resolve_hook_fn mori_resolve_hook;
 /* Embedder open hook (mori.h): the consumer-mapping cache's miss branch. */
 static mori_open_hook_fn mori_open_hook;
 
-void mori_set_wire_hooks(mori_emit_hook_fn emit, mori_resolve_hook_fn resolve) {
-  mori_emit_hook = emit;
-  mori_resolve_hook = resolve;
-}
-
-void mori_set_open_hook(mori_open_hook_fn hook) {
-  mori_open_hook = hook;
-}
-
 /* Embedder attribute-blob hooks (mori.h): set once at embedder load as a
    triple, consulted at every attribute-blob write and read. */
 static mori_attrs_size_fn mori_attrs_size_hook;
 static mori_attrs_write_fn mori_attrs_write_hook;
 static mori_attrs_read_fn mori_attrs_read_hook;
-
-void mori_set_attrs_hooks(mori_attrs_size_fn size,
-                               mori_attrs_write_fn write,
-                               mori_attrs_read_fn read) {
-  mori_attrs_size_hook = size;
-  mori_attrs_write_hook = write;
-  mori_attrs_read_hook = read;
-}
-
-/* Embedder attribute-blob parse hook (mori.h): mori_attrs_match's
-   decode of the embedder form to a comparable container. */
-static mori_attrs_parse_fn mori_attrs_parse_hook;
-
-void mori_set_attrs_parse_hook(mori_attrs_parse_fn parse) {
-  mori_attrs_parse_hook = parse;
-}
 
 /* The attr blob's size: the embedder's encoding when the hooks are set
    and accept the set (a nonzero return), else R_Serialize. x is the
@@ -158,10 +132,6 @@ static int view_int64_classed(SEXP x, int altrep_ok) {
      class-only test is exactly one node, the class */
   return TAG(ATTRIB(x)) == R_ClassSymbol && CDR(ATTRIB(x)) == R_NilValue;
 #endif
-}
-
-int mori_is_int64(SEXP x) {
-  return view_int64_classed(x, 0);
 }
 
 /* The ALTREP-tolerant half: the capability gates and the interop writer ask
@@ -556,174 +526,6 @@ SEXP mori_vec_wrap(const void *data, R_xlen_t length, int sexptype,
   if (sexptype == MORI_TYPE_INT64)
     Rf_classgets(result, mori_int64_class);
   UNPROTECT(2);
-  return result;
-}
-
-// ALTREP uint64 view (the MIZU_CAP_MORL_U64V landing) ------------------------
-
-/* A verbatim uint64 frame column (an INT64 leaf whose blob carries the
-   u64 marker) lands as this converting class: REALSXP, no class
-   attribute. The region's u64 lanes stay authoritative — the read-only
-   Dataptr builds the converted doubles once into the data1 struct's
-   cache (the warning fires at that first touch: there is no per-element
-   path, so the first touch is the materialization), never data2, so the
-   exact-export borrow keyed on an empty data2 survives prints and
-   summaries; the writable Dataptr COWs the converted values into data2
-   and releases the loan — the value has diverged from the bits, and the
-   exact export is rightly gone ("data2 set means by value").
-   Dataptr_or_null stays NULL while SHM-backed: the u64 bits are not
-   doubles. The prefix layout matches mori_vec, so the shared
-   helpers (mori_index_of) read it unchanged. */
-
-typedef struct {
-  mori_owned owned;
-  const void *data;
-  R_xlen_t length;
-  int32_t index;
-  double *converted;      /* the cached conversion, NULL until touched */
-} mori_u64;
-
-static void mori_u64_finalizer(SEXP ptr) {
-  mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(ptr);
-  if (v != NULL) {
-    mori_release_once(&v->owned);
-    free(v->converted);
-    free(v);
-    R_ClearExternalPtr(ptr);
-  }
-}
-
-/* The one conversion pass: u64 -> double, NA_real_ past 2^53 — the null
-   slots' sentinel fill (2^63) lands NA by the same rule. */
-static double *mori_u64_convert(mori_u64 *v) {
-  if (v->converted != NULL) return v->converted;
-  const R_xlen_t n = v->length;
-  double *out =
-    (double *) malloc((size_t) (n != 0 ? n : 1) * sizeof(double));
-  if (out == NULL) Rf_error("mori: allocation failure");
-  const uint64_t *u = (const uint64_t *) v->data;
-  uint64_t lost = 0;
-  for (R_xlen_t i = 0; i < n; i++) {
-    if (u[i] > 9007199254740992ULL) {   /* 2^53 */
-      out[i] = NA_REAL;
-      lost++;
-    } else {
-      out[i] = (double) u[i];
-    }
-  }
-  v->converted = out;
-  if (lost != 0)
-    Rf_warning(
-      "mori: %llu uint64 value(s) beyond +/-2^53 convert to NA_real_",
-      (unsigned long long) lost
-    );
-  return out;
-}
-
-static R_xlen_t mori_u64_Length(SEXP x) {
-  SEXP d2 = R_altrep_data2(x);
-  if (d2 != R_NilValue)
-    return XLENGTH(d2);
-  mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(R_altrep_data1(x));
-  return v->length;
-}
-
-static const void *mori_u64_Dataptr_or_null(SEXP x) {
-  SEXP d2 = R_altrep_data2(x);
-  return d2 != R_NilValue ? DATAPTR_RO(d2) : NULL;
-}
-
-static void *mori_u64_Dataptr(SEXP x, Rboolean writable) {
-  SEXP d2 = R_altrep_data2(x);
-  if (d2 != R_NilValue)
-    return mori_data_ptr(d2);
-
-  mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(R_altrep_data1(x));
-  if (!writable)
-    return mori_u64_convert(v);
-
-  /* COW: the converted values move into data2 and the loan releases, as
-     the vec class's — the converted double is the value from here */
-  const R_xlen_t n = v->length;
-  SEXP mat = PROTECT(Rf_allocVector(REALSXP, n));
-  double *p = mori_data_ptr(mat);
-  memcpy(p, mori_u64_convert(v), (size_t) n * sizeof(double));
-  R_set_altrep_data2(x, mat);
-  UNPROTECT(1);
-  free(v->converted);
-  v->converted = NULL;
-  mori_release_once(&v->owned);
-  return p;
-}
-
-/* The u64 element reads: per element off the conversion cache (the first
-   touch builds it, warning included — the Dataptr discipline). */
-static double mori_u64_Elt(SEXP x, R_xlen_t i) {
-  SEXP d2 = R_altrep_data2(x);
-  if (d2 != R_NilValue) return REAL_ELT(d2, i);
-  mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(R_altrep_data1(x));
-  return mori_u64_convert(v)[i];
-}
-
-static R_xlen_t mori_u64_Get_region(SEXP x, R_xlen_t i, R_xlen_t n,
-                                         double *buf) {
-  SEXP d2 = R_altrep_data2(x);
-  const double *src;
-  R_xlen_t len;
-  if (d2 != R_NilValue) {
-    src = (const double *) DATAPTR_RO(d2);
-    len = XLENGTH(d2);
-  } else {
-    mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(R_altrep_data1(x));
-    src = mori_u64_convert(v);
-    len = v->length;
-  }
-  if (i >= len) return 0;
-  const R_xlen_t ncopy = len - i < n ? len - i : n;
-  memcpy(buf, src + i, (size_t) ncopy * sizeof(double));
-  return ncopy;
-}
-
-static SEXP mori_u64_Serialized_state(SEXP x) {
-  SEXP data2 = R_altrep_data2(x);
-  if (data2 != R_NilValue) return data2;  /* COW-materialized copy */
-
-  SEXP data1 = R_altrep_data1(x);
-  mori_u64 *v = (mori_u64 *) R_ExternalPtrAddr(data1);
-
-  char buf[MORI_FORMAT_BUFLEN];
-  if (mori_format_chain(R_ExternalPtrProtected(data1), v->index,
-                             buf, sizeof(buf)) == 0) {
-    if (mori_emit_hook != NULL) mori_emit_hook(x);
-    return Rf_mkString(buf);
-  }
-
-  /* Overflow / malformed chain: materialize the converted values. */
-  const R_xlen_t n = v->length;
-  SEXP mat = PROTECT(Rf_allocVector(REALSXP, n));
-  memcpy(mori_data_ptr(mat), mori_u64_convert(v),
-         (size_t) n * sizeof(double));
-  UNPROTECT(1);
-  return mat;
-}
-
-SEXP mori_u64_rewrap(SEXP x) {
-  SEXP d1 = R_altrep_data1(x);
-  mori_vec *src = (mori_vec *) R_ExternalPtrAddr(d1);
-  mori_u64 *v = (mori_u64 *) malloc(sizeof(mori_u64));
-  if (v == NULL) Rf_error("mori: allocation failure");
-  v->owned = src->owned;
-  v->data = src->data;
-  v->length = src->length;
-  v->index = src->index;
-  v->converted = NULL;
-  SEXP ptr = PROTECT(R_MakeExternalPtr(v, mori_owned_tag,
-                                       R_ExternalPtrProtected(d1)));
-  R_RegisterCFinalizerEx(ptr, mori_u64_finalizer, TRUE);
-  /* the release record transfers only once v's finalizer owns it */
-  src->owned.release = NULL;
-  SEXP result = R_new_altrep(mori_u64_class, ptr, R_NilValue);
-  UNPROTECT(1);
   return result;
 }
 
@@ -1325,7 +1127,7 @@ static size_t mori_string_data_size(SEXP x) {
 
 // Recursive size/write helpers for nested list regions -----------------------
 
-/* The pre-measured string-leaf sums' cursor (mori_layout_size_sums):
+/* The pre-measured string-leaf sums' cursor (the pre-measured size pass):
    one consumption per STRSXP leaf, in the tree's pre-order. NULL walks
    the leaves itself. */
 typedef struct {
@@ -1919,24 +1721,6 @@ static size_t mori_layout_size_impl(SEXP x, int *ok, int foreign,
   return 0;
 }
 
-size_t mori_layout_size(SEXP x, int foreign) {
-  int ok = 1;
-  return mori_layout_size_impl(x, &ok, foreign, NULL);
-}
-
-/* The presized variant (mori.h): the string leaves' body sums arrive
-   pre-measured in pre-order. A count mismatch — shortfall inside the
-   walk or a leftover here — is a recording bug: 0, as a veto returns, so
-   the caller's mori_layout_size fallback covers both. */
-size_t mori_layout_size_sums(SEXP x, int foreign, const size_t *sums,
-                                  size_t nsums) {
-  int ok = 1;
-  mori_sump sp = { sums, nsums };
-  size_t total = mori_layout_size_impl(x, &ok, foreign, &sp);
-  if (total == 0 || sp.left != 0) return 0;
-  return total;
-}
-
 size_t mori_layout_write(unsigned char *base, SEXP x, int foreign) {
   int type = TYPEOF(x);
   if (type == VECSXP || type == LISTSXP) {
@@ -2131,203 +1915,6 @@ int mori_refable(SEXP x) {
   if (!mori_view_check(x)) return 0;
   if (TYPEOF(x) != VECSXP && R_altrep_data2(x) != R_NilValue) return 0;
   return !ANY_ATTRIB(x);
-}
-
-/* A pairlist attribute set as a named list, for cross-form comparison
-   (a region blob written under another R version's container form, the
-   embedder form's dict): VECSXP passes through. */
-static SEXP mori_attrs_as_list(SEXP attrs) {
-  if (attrs == R_NilValue || TYPEOF(attrs) == VECSXP) return attrs;
-  R_xlen_t n = 0;
-  for (SEXP a = attrs; a != R_NilValue; a = CDR(a)) n++;
-  SEXP out = PROTECT(Rf_allocVector(VECSXP, n));
-  SEXP names = PROTECT(Rf_allocVector(STRSXP, n));
-  R_xlen_t i = 0;
-  for (SEXP a = attrs; a != R_NilValue; a = CDR(a), i++) {
-    SET_VECTOR_ELT(out, i, CAR(a));
-    SET_STRING_ELT(names, i, PRINTNAME(TAG(a)));
-  }
-  Rf_setAttrib(out, R_NamesSymbol, names);
-  UNPROTECT(2);
-  return out;
-}
-
-/* The blob decode, contained: a blob the region's own write produced
-   parses here as it did at wrap; anything else (a peer-rewritten entry,
-   a corrupt region) declines to the by-value paths rather than raise
-   out of a stage. */
-typedef struct {
-  const unsigned char *buf;
-  size_t size;
-  int jumped;
-} mori_aparse;
-
-static SEXP mori_aparse_do(void *data) {
-  mori_aparse *a = (mori_aparse *) data;
-  if (a->buf[0] == MORI_INTEROP_MAGIC && mori_attrs_parse_hook != NULL)
-    return mori_attrs_parse_hook(a->buf, a->size);
-  return mori_unserialize_from((unsigned char *) a->buf, a->size);
-}
-
-static void mori_aparse_cleanup(void *data, Rboolean jump) {
-  if (jump) ((mori_aparse *) data)->jumped = 1;
-}
-
-/* A named-list attribute set's key lookup. */
-static int mori_attrs_list_has(SEXP attrs_list, const char *key) {
-  if (TYPEOF(attrs_list) != VECSXP) return 0;
-  SEXP names = Rf_getAttrib(attrs_list, R_NamesSymbol);
-  if (names == R_NilValue) return 0;
-  for (R_xlen_t i = 0; i < XLENGTH(attrs_list); i++)
-    if (strcmp(CHAR(STRING_ELT(names, i)), key) == 0) return 1;
-  return 0;
-}
-
-/* reg_l with the integer64 class appended (the singleton — the list
-   gains no fresh value). */
-static SEXP mori_attrs_add_int64_class(SEXP reg_l) {
-  SEXP onames = PROTECT(Rf_getAttrib(reg_l, R_NamesSymbol));
-  const R_xlen_t n = XLENGTH(reg_l);
-  SEXP out = PROTECT(Rf_allocVector(VECSXP, n + 1));
-  SEXP names = PROTECT(Rf_allocVector(STRSXP, n + 1));
-  for (R_xlen_t i = 0; i < n; i++) {
-    SET_VECTOR_ELT(out, i, VECTOR_ELT(reg_l, i));
-    SET_STRING_ELT(names, i, STRING_ELT(onames, i));
-  }
-  SET_VECTOR_ELT(out, n, mori_int64_class);
-  SET_STRING_ELT(names, n, Rf_mkChar("class"));
-  Rf_setAttrib(out, R_NamesSymbol, names);
-  UNPROTECT(3);
-  return out;
-}
-
-/* The parsed blob as the resolve would apply it: a class-only int64
-   root's class rides the wire tag, not the blob — the tag re-applies it
-   at the wrap unless the blob names a class of its own. */
-static SEXP mori_attrs_resolve_form(SEXP reg, int int64_tag) {
-  SEXP reg_l = PROTECT(mori_attrs_as_list(reg));
-  SEXP out = reg_l;
-  if (int64_tag && !mori_attrs_list_has(reg_l, "class"))
-    out = mori_attrs_add_int64_class(reg_l);
-  UNPROTECT(1);
-  return out;
-}
-
-/* mori.h's REF-gate divergence check. The walk mirrors the resolve
-   geometry (mori_open_vector/string/list, the open_elem tail):
-   root headers for a bare name, the terminal directory entry for a
-   path, a nested list's attrs inside its child MORL. Only a CONFIRMED
-   divergence declines: a corrupt or rewritten region keeps the REF
-   (the resolve re-validates and raises there, as it did without the
-   gate), and an unparseable blob does likewise. */
-int mori_attrs_match(SEXP x, SEXP id) {
-  char name[MORI_NAME_MAX];
-  int32_t path[MORI_MAX_PATH];
-  int path_len = 0;
-  if (mori_parse_id(CHAR(STRING_ELT(id, 0)), name, sizeof(name),
-                         path, &path_len) < 0)
-    return 1;
-  mori_shm *shm = mori_chain_shm(x);
-  if (shm == NULL) return 1;
-  const unsigned char *base = (const unsigned char *) shm->addr;
-  const int64_t region_size = (int64_t) shm->size;
-  if (region_size < MORI_HEADER_SIZE) return 1;
-
-  const unsigned char *blob = NULL;
-  int64_t blob_size = 0;
-  int s4 = 0;
-  if (path_len == 0) {
-    uint32_t magic, flags;
-    memcpy(&magic, base, 4);
-    memcpy(&flags, base + MORI_FLAGS_OFF, 4);
-    s4 = (flags & MORI_FLAG_S4) != 0;
-    if (magic == MORI_MAGIC_VEC) {
-      int32_t sexptype;
-      int64_t length, attrs_size;
-      memcpy(&sexptype, base + 4, 4);
-      memcpy(&length, base + 8, 8);
-      memcpy(&attrs_size, base + 16, 8);
-      const int64_t elt = (int64_t) mori_sizeof_elt(sexptype);
-      if (elt == 0 || length < 0 ||
-          length > (region_size - MORI_HEADER_SIZE) / elt)
-        return 1;
-      const int64_t off = MORI_HEADER_SIZE + length * elt;
-      if (mori_oob(off, attrs_size, region_size)) return 1;
-      blob = base + off;
-      blob_size = attrs_size;
-    } else if (magic == MORI_MAGIC_STR) {
-      int32_t attrs32;
-      int64_t str_size;
-      memcpy(&attrs32, base + 4, 4);
-      memcpy(&str_size, base + 16, 8);
-      const int64_t off = MORI_HEADER_SIZE + str_size;
-      if (mori_oob(off, (int64_t) attrs32, region_size)) return 1;
-      blob = base + off;
-      blob_size = attrs32;
-    } else if (magic == MORI_MAGIC_LIST) {
-      int64_t attrs_offset, attrs_size;
-      memcpy(&attrs_offset, base + 8, 8);
-      memcpy(&attrs_size, base + 16, 8);
-      if (mori_oob(attrs_offset, attrs_size, region_size)) return 1;
-      blob = base + attrs_offset;
-      blob_size = attrs_size;
-    } else {
-      return 1;
-    }
-  } else {
-    const unsigned char *leaf;
-    mori_morl_entry ent;
-    if (mori_path_entry(base, region_size, path, path_len, &leaf,
-                             &ent) != 0)
-      return 1;
-    s4 = (ent.sexptype & (int32_t) MORI_ELEM_S4) != 0;
-    const int32_t tag = ent.sexptype & ~(int32_t) MORI_ELEM_S4;
-    if (tag == MORI_TYPE_VEC) {
-      /* a nested list's attrs live inside its child MORL's header */
-      if (ent.data_offset < 0 || ent.data_size < MORI_HEADER_SIZE)
-        return 1;
-      const unsigned char *child = leaf + ent.data_offset;
-      uint32_t cmagic;
-      memcpy(&cmagic, child, 4);
-      if (cmagic != MORI_MAGIC_LIST) return 1;
-      int64_t attrs_offset, attrs_size;
-      memcpy(&attrs_offset, child + 8, 8);
-      memcpy(&attrs_size, child + 16, 8);
-      if (mori_oob(attrs_offset, attrs_size, ent.data_size)) return 1;
-      blob = child + attrs_offset;
-      blob_size = attrs_size;
-    } else if (tag == 0 || tag == MORI_TAG_REF) {
-      return 1;   /* a serialized leaf or a remote hop: never this id */
-    } else {
-      if (ent.attrs_size < 0 || ent.attrs_size > ent.data_size) return 1;
-      blob = leaf + ent.data_offset + ent.data_size - ent.attrs_size;
-      blob_size = ent.attrs_size;
-    }
-  }
-  if ((Rf_isS4(x) != 0) != s4) return 0;
-  /* an empty blob: only an unadorned view, or a class-only int64 (its
-     class riding the wire tag), round-trips */
-  if (blob_size == 0) return mori_is_int64_any(x) || !ANY_ATTRIB(x);
-  if (!ANY_ATTRIB(x)) return 0;
-
-  mori_aparse a = { blob, (size_t) blob_size, 0 };
-  SEXP cont = PROTECT(R_MakeUnwindCont());
-  SEXP reg = R_UnwindProtect(mori_aparse_do, &a,
-                             mori_aparse_cleanup, &a, cont);
-  if (a.jumped) {
-    UNPROTECT(1);
-    return 1;
-  }
-  PROTECT(reg);
-  SEXP reg_l = PROTECT(mori_attrs_resolve_form(
-    reg, mori_is_int64_any(x)
-  ));
-  SEXP cur = PROTECT(mori_get_attrs_for_serialize(x));
-  SEXP cur_l = PROTECT(mori_attrs_as_list(cur));
-  const int eq =
-    R_compute_identical(cur_l, reg_l, IDENT_USE_CLOENV) == TRUE;
-  UNPROTECT(5);
-  return eq;
 }
 
 SEXP mori_is_shared(SEXP x) {
@@ -2782,89 +2369,6 @@ static SEXP mori_unwrap_remote(unsigned char *base, int64_t region_size,
   return result;
 }
 
-/* Fire a view's armed release record now, ahead of the GC: the
-   once-only discipline (a no-op when the view is not a view, unarmed, or
-   already fired — a COW-materialized view fired at materialization). The
-   deterministic-release paths (the F1 worker's argument-loan release)
-   call it only on views provably dead to the R side from here — the
-   release subs the region's count while the pages stay mapped, so a live
-   reader of the same pages must hold its own count. */
-void mori_release_now(SEXP x) {
-  if (!mori_view_check(x)) return;
-  mori_owned *o = (mori_owned *) R_ExternalPtrAddr(R_altrep_data1(x));
-  if (o != NULL) mori_release_once(o);
-}
-
-// Remote-leaf directory walk ----------------------------------------------------
-
-/* Report every tag-33 identifier span in an MORL tree to fn, once per
-   occurrence (dedupe is the caller's). The lazy element reader counts a
-   remote leaf's region only at first access — after the consumer-done
-   signal — so an embedder that wants the referenced regions held from the
-   wrap walks here and loans them itself. Iterates with an explicit stack
-   (nesting depth is region-bounded, not call-bounded) and validates every
-   header and span it reads, mirroring the lazy readers' corrupt-or-newer
-   rejections. */
-void mori_morl_remote_walk(unsigned char *base, int64_t region_size,
-                                mori_remote_fn fn, void *ctx) {
-  struct walk_frame { unsigned char *base; int64_t size; };
-  size_t cap = 8, top = 0;
-  struct walk_frame *st = malloc(cap * sizeof *st);
-  if (st == NULL) Rf_error("mori: allocation failure");
-#define MORI_WALK_FAIL(...) do { free(st); Rf_error(__VA_ARGS__); } while (0)
-  st[top++] = (struct walk_frame) { base, region_size };
-  while (top > 0) {
-    struct walk_frame f = st[--top];
-    if (f.size < MORI_HEADER_SIZE)
-      MORI_WALK_FAIL("mori: invalid nested list region");
-    uint32_t magic;
-    memcpy(&magic, f.base, 4);
-    if (magic != MORI_MAGIC_LIST)
-      MORI_WALK_FAIL("mori: invalid nested list region");
-    int32_t n;
-    int64_t attrs_offset, attrs_size;
-    memcpy(&n, f.base + 4, 4);
-    memcpy(&attrs_offset, f.base + 8, 8);
-    memcpy(&attrs_size, f.base + 16, 8);
-    if (n < 0 || n > (f.size - MORI_HEADER_SIZE) / 32 ||
-        mori_oob(attrs_offset, attrs_size, f.size) ||
-        !mori_flags_known(f.base))
-      MORI_WALK_FAIL("mori: invalid nested list region");
-    for (int32_t i = 0; i < n; i++) {
-      mori_elem entry;
-      memcpy(&entry, f.base + MORI_HEADER_SIZE + 32 * (size_t) i,
-             sizeof(entry));
-      int32_t tag = entry.sexptype & ~MORI_ELEM_S4;
-      if (mori_oob(entry.data_offset, entry.data_size, f.size) ||
-          (entry.data_offset & 63) != 0)
-        MORI_WALK_FAIL("mori: invalid element data");
-      if (tag == MORI_TAG_REF) {
-        if (entry.data_size < 1 || entry.data_size > MORI_REF_SPAN_MAX)
-          MORI_WALK_FAIL(
-            "mori: invalid MORL remote leaf — corrupt or newer region");
-        fn((const char *) f.base + entry.data_offset,
-           (int) entry.data_size, ctx);
-      } else if (tag == VECSXP) {
-        if (top == cap) {
-          cap *= 2;
-          struct walk_frame *bigger =
-            realloc(st, cap * sizeof *st);
-          if (bigger == NULL) {
-            free(st);
-            Rf_error("mori: allocation failure");
-          }
-          st = bigger;
-        }
-        st[top++] = (struct walk_frame) {
-          f.base + entry.data_offset, entry.data_size
-        };
-      }
-    }
-  }
-  free(st);
-#undef MORI_WALK_FAIL
-}
-
 /* Vec and list classes: a STRSXP state is always an SHM identifier (their
    materialized fallbacks are atomic vectors or VECSXP, never STRSXP), so a
    probe miss means a corrupt stream. A well-formed identifier whose region
@@ -2974,20 +2478,6 @@ void mori_altrep_init(DllInfo *dll, SEXP cache_wraps) {
   R_set_altcomplex_Get_region_method(mori_complex_class,
                                      mori_complex_Get_region);
 
-  /* the converting uint64 class (the MIZU_CAP_MORL_U64V landing) */
-  mori_u64_class = R_make_altreal_class("mizu_u64", "mori", dll);
-  R_set_altrep_Length_method(mori_u64_class, mori_u64_Length);
-  R_set_altvec_Dataptr_method(mori_u64_class, mori_u64_Dataptr);
-  R_set_altvec_Dataptr_or_null_method(mori_u64_class,
-                                      mori_u64_Dataptr_or_null);
-  R_set_altreal_Elt_method(mori_u64_class, mori_u64_Elt);
-  R_set_altreal_Get_region_method(mori_u64_class,
-                                  mori_u64_Get_region);
-  R_set_altrep_Serialized_state_method(mori_u64_class,
-                                       mori_u64_Serialized_state);
-  R_set_altrep_Unserialize_method(mori_u64_class,
-                                  mori_Unserialize);
-
   /* ALTSTRING class */
   mori_string_class = R_make_altstring_class("mori_string", "mori", dll);
   R_set_altrep_Length_method(mori_string_class, mori_string_Length);
@@ -3001,6 +2491,3 @@ void mori_altrep_init(DllInfo *dll, SEXP cache_wraps) {
   R_set_altrep_Unserialize_method(mori_string_class, mori_string_Unserialize);
 }
 
-void mori_altrep_fini(void) {
-  R_ReleaseObject(mori_int64_class);
-}

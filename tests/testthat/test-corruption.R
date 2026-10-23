@@ -23,10 +23,25 @@ MORS <- strtoi("4d4f5253", 16L) # "MORS" magic, little-endian
 REALSXP <- 14L
 STRSXP <- 16L
 VECSXP <- 19L
+TAG_REF <- 33L # remote leaf: the column lives in another region
 
 # MORL header (64 bytes) + 32-byte directory entries (see SHM Region Layouts).
 morl_header <- function(n, attrs_offset = 0, attrs_size = 0) {
   c(i32(MORL), i32(n), i64(attrs_offset), i64(attrs_size), raw(40L))
+}
+# MORL header with the validity pair [40-47]/[48-55] filled in — the remote
+# leaf reader consults it for an entry's NA claim.
+morl_header_v <- function(n, voff = 0, vcount = 0) {
+  c(
+    i32(MORL),
+    i32(n),
+    i64(0),
+    i64(0),
+    raw(16L),
+    i64(voff),
+    i64(vcount),
+    raw(8L)
+  )
 }
 morl_entry <- function(
   data_offset,
@@ -363,4 +378,140 @@ test_that("element access errors when string block sections exceed their data", 
     raw(48L)
   ))
   expect_error(map_shared(name)[[1]], "invalid string data")
+})
+
+test_that("element access errors on a truncated serialized payload", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  # A sexptype-0 entry holds serialized bytes in R's native binary format;
+  # truncating the stream just after its 14-byte header makes the first
+  # object read overrun the span.
+  truncated <- serialize(42L, NULL, xdr = FALSE)[seq_len(14L)]
+  name <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(
+      data_offset = 128,
+      data_size = length(truncated),
+      sexptype = 0L
+    ),
+    raw(32L),
+    truncated
+  ))
+  expect_error(map_shared(name)[[1]], "corrupt payload stream")
+})
+
+test_that("remote leaf access errors on a malformed identifier span", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  # data_size 0: below the 1-byte minimum identifier span
+  empty <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(
+      data_offset = 128,
+      data_size = 0,
+      sexptype = TAG_REF,
+      length = 1
+    ),
+    raw(64L)
+  ))
+  expect_error(map_shared(empty)[[1]], "invalid MORL remote leaf")
+
+  # data_size 256: above the 255-byte maximum identifier span
+  wide <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(
+      data_offset = 128,
+      data_size = 256,
+      sexptype = TAG_REF,
+      length = 1
+    ),
+    raw(64L),
+    raw(256L)
+  ))
+  expect_error(map_shared(wide)[[1]], "invalid MORL remote leaf")
+
+  # the S4 bit set: never valid on a remote leaf (MORI_ELEM_S4 = bit 30)
+  s4 <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(
+      data_offset = 128,
+      data_size = 1,
+      sexptype = TAG_REF + 2^30,
+      length = 1
+    ),
+    raw(64L)
+  ))
+  expect_error(map_shared(s4)[[1]], "invalid MORL remote leaf")
+})
+
+test_that("remote leaf access errors on a header NA claim that is none", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  # The header validity pair {0, 5}: an offset of 0 admits only the {0, 0}
+  # and {0, -1} claims. The span is valid; the claim check fires first.
+  name <- write_corrupt(c(
+    morl_header_v(n = 1L, voff = 0, vcount = 5),
+    morl_entry(
+      data_offset = 128,
+      data_size = 1,
+      sexptype = TAG_REF,
+      length = 1
+    ),
+    raw(64L)
+  ))
+  expect_error(map_shared(name)[[1]], "invalid MORL remote leaf")
+})
+
+test_that("remote leaf access errors when claims mismatch the referenced region", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  target <- share(1:10)
+  id_bytes <- charToRaw(shared_name(target))
+  # The entry claims length 999; the referenced region holds 10 elements.
+  name <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(
+      data_offset = 128,
+      data_size = length(id_bytes),
+      sexptype = TAG_REF,
+      length = 999
+    ),
+    raw(32L),
+    id_bytes,
+    raw(64L)
+  ))
+  expect_error(
+    map_shared(name)[[1]],
+    "claims do not match the referenced region"
+  )
+})
+
+test_that("remote leaf resolves a well-formed reference", {
+  if (Sys.info()[["sysname"]] != "Linux") {
+    skip("requires file-backed /dev/shm (Linux only)")
+  }
+
+  target <- share(1:10)
+  id_bytes <- charToRaw(shared_name(target))
+  name <- write_corrupt(c(
+    morl_header(n = 1L),
+    morl_entry(
+      data_offset = 128,
+      data_size = length(id_bytes),
+      sexptype = TAG_REF,
+      length = 10
+    ),
+    raw(32L),
+    id_bytes,
+    raw(64L)
+  ))
+  expect_identical(map_shared(name)[[1]][1:3], 1:3)
 })
