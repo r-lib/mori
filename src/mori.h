@@ -180,6 +180,22 @@ SEXP mori_list_wrap(unsigned char *base, int64_t region_size, int32_t index,
    callers reassign. */
 SEXP mori_restore_attrs(SEXP result, unsigned char *buf, size_t size);
 
+/* The wrap tail every region root wrap shares: restore the header's attrs
+   blob when present (the restore PROTECTs — the result may be a
+   substituted value), the S4 flag applied last in both branches. Returns
+   the possibly-converted view. */
+static inline SEXP mori_restore_tail(SEXP view, unsigned char *blob,
+                                          size_t attrs_size,
+                                          const unsigned char *base) {
+  if (attrs_size > 0) {
+    view = PROTECT(mori_restore_attrs(view, blob, attrs_size));
+    view = mori_apply_s4(view, base);
+    UNPROTECT(1);
+    return view;
+  }
+  return mori_apply_s4(view, base);
+}
+
 /* Layout oracle and writer for embedder-managed regions: the size pass
    walks the tree and returns 0 for anything the layout writer must not
    take: an ALTREP node is rejected unless it is a view (rides the

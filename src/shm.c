@@ -74,6 +74,7 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
 
   shm->addr = NULL;
   shm->size = 0;
+  shm->collapsed = 0;
   shm->handle = NULL;
   shm->pid = (unsigned int) GetCurrentProcessId();
 
@@ -107,6 +108,7 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
 
   shm->addr = NULL;
   shm->size = 0;
+  shm->collapsed = 0;
   shm->handle = NULL;
   mori_shm_set_name(shm, name);
   shm->pid = 0;                      /* consumer: never the creator */
@@ -121,8 +123,17 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
   }
 
   MEMORY_BASIC_INFORMATION mbi;
-  VirtualQuery(addr, &mbi, sizeof(mbi));
+  if (VirtualQuery(addr, &mbi, sizeof(mbi)) == 0) {
+    UnmapViewOfFile(addr);
+    CloseHandle(h);
+    return -1;
+  }
 
+  /* RegionSize is the view's page-rounded span: a section's created
+     size is not recoverable from the handle through a documented API.
+     The excess is bounded by a page of zero-filled mapped memory, and
+     every consumer validates the region's inner geometry against sizes
+     the creator stamped inside the region itself. */
   shm->addr = addr;
   shm->size = mbi.RegionSize;
   shm->handle = h;
@@ -158,6 +169,13 @@ char **mori_shm_reap(int *n) {
 #define MAP_POPULATE 0
 #endif
 
+/* Linux 6.1's MADV_COLLAPSE postdates some shipping libc headers; the
+   number is fixed, and an older kernel EINVALs into the create's
+   populate fallback. */
+#if defined(__linux__) && !defined(MADV_COLLAPSE)
+#define MADV_COLLAPSE 25
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 1024
 #endif
@@ -178,14 +196,19 @@ static int mori_err_classify(long code) {
 }
 
 /* Linux: go through /dev/shm directly to avoid the -lrt link dependency
-   that shm_open/shm_unlink would introduce. macOS has them in libc. */
+   that shm_open/shm_unlink would introduce. macOS has them in libc.
+   Non-static: the writable-attach layer (shm_rw.c) shares it. */
 
 #ifdef __linux__
 
-static int mori_shm_os_open(const char *name, int flags, mode_t mode) {
+#include <sys/statvfs.h>
+
+int mori_shm_os_open(const char *name, int flags, mode_t mode) {
   char path[64];
   snprintf(path, sizeof(path), "/dev/shm%s", name);
-  return open(path, flags, mode);
+  /* O_CLOEXEC: the fd lives only until the mmap below, but a concurrent
+     thread's fork+exec in that window would otherwise inherit it */
+  return open(path, flags | O_CLOEXEC, mode);
 }
 
 static int mori_shm_os_unlink(const char *name) {
@@ -196,8 +219,16 @@ static int mori_shm_os_unlink(const char *name) {
 
 #else /* macOS / other POSIX */
 
-static int mori_shm_os_open(const char *name, int flags, mode_t mode) {
-  return shm_open(name, flags, mode);
+int mori_shm_os_open(const char *name, int flags, mode_t mode) {
+  /* macOS shm_open rejects O_CLOEXEC: set it by fcntl. The fd lives
+     only until the mmap below, but a concurrent thread's fork+exec in
+     that window would otherwise inherit it. */
+  int fd = shm_open(name, flags, mode);
+  if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+    close(fd);
+    return -1;
+  }
+  return fd;
 }
 
 #ifdef __APPLE__
@@ -241,13 +272,15 @@ static int mori_log_dir(char *out, size_t size) {
 
 /* This process's log fd, opened on first append and cached for the
    process's lifetime — never closed, so a thread using a loaded value
-   can never write to a reused fd. A forked child sees the pid mismatch
-   and opens its own log, leaking the inherited fd (closing it could
-   race a sibling thread's write). The release/acquire pairing on
-   mori_log_pid orders the fd reset before the pid change becomes
-   visible. */
-static _Atomic int   mori_log_fd  = -1;
-static _Atomic pid_t mori_log_pid = 0;        /* pid that opened mori_log_fd */
+   can never write to a reused fd. pid and fd pack into one atomic word
+   so the post-fork reset is a single CAS: a blind fd store could
+   clobber an fd a racing thread had just installed for the same pid.
+   A forked child sees the pid mismatch and opens its own log, leaking
+   the inherited fd (closing it could race a sibling thread's write). */
+#define MORI_LOG_PID_MASK 0xffffffff00000000ull
+#define MORI_LOG_NO_FD    0xffffffffu          /* low word: no fd yet */
+#define MORI_LOG_MINE     ((uint64_t) (uint32_t) getpid() << 32)
+static _Atomic uint64_t mori_log_state = MORI_LOG_NO_FD;  /* pid << 32 | fd */
 
 /* Truncate the log at a zero crossing only once it holds this many
    records: below the floor the file is at most 1 KB and the ftruncate
@@ -263,6 +296,14 @@ static _Atomic pid_t mori_log_pid = 0;        /* pid that opened mori_log_fd */
 static _Atomic long mori_log_live  = 0;
 static _Atomic long mori_log_dirty = 0;
 
+/* This process's registry-log path ("<dir>/mori_<pid hex>"), 0/-1. */
+static int mori_log_path(char *dir, size_t dsize, char *path, size_t psize) {
+  if (mori_log_dir(dir, dsize) != 0) return -1;
+  int n = snprintf(path, psize, "%s/%s%x", dir, &MORI_PREFIX_LITERAL[1],
+                   (unsigned) getpid());
+  return n > 0 && (size_t) n < psize ? 0 : -1;
+}
+
 /* Record a created region: its name's counter as one 4-byte record
    (native endianness — the log is read on the same host), opening the
    log on first use. The count increments unconditionally, staying
@@ -275,34 +316,42 @@ static void mori_log_append(const char *name) {
   if (us == NULL) return;
   uint32_t rec = (uint32_t) strtoul(us + 1, NULL, 16);
 
-  pid_t pid = getpid();
-  int fd = -1;
-  if (atomic_load_explicit(&mori_log_pid, memory_order_acquire) == pid)
-    fd = atomic_load_explicit(&mori_log_fd, memory_order_relaxed);
-  else {                                     /* first append, or post-fork */
-    atomic_store_explicit(&mori_log_fd, -1, memory_order_relaxed);
-    atomic_store_explicit(&mori_log_pid, pid, memory_order_release);
+  const uint64_t mine = MORI_LOG_MINE;
+  uint64_t cur = atomic_load_explicit(&mori_log_state, memory_order_acquire);
+  if ((cur & MORI_LOG_PID_MASK) != mine) {
+    /* first append, or post-fork: a lost reset CAS just means a
+       sibling's reset or install won — cur holds the winning state */
+    uint64_t want = mine | MORI_LOG_NO_FD;
+    if (atomic_compare_exchange_strong_explicit(&mori_log_state, &cur, want,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire))
+      cur = want;
   }
+  int fd = (int32_t) (uint32_t) cur;
   if (fd < 0) {
     char dir[PATH_MAX], path[PATH_MAX];
-    if (mori_log_dir(dir, sizeof(dir)) != 0) return;
-    int n = snprintf(path, sizeof(path), "%s/%s%x", dir,
-                     &MORI_PREFIX_LITERAL[1], (unsigned) pid);
-    if (n <= 0 || (size_t) n >= sizeof(path)) return;
+    if (mori_log_path(dir, sizeof(dir), path, sizeof(path)) != 0) return;
     int nfd = open(path, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0600);
     if (nfd < 0 && errno == ENOENT) {   /* dir absent: create it and retry */
       mkdir(dir, 0700);
       nfd = open(path, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0600);
     }
     if (nfd < 0) return;
-    int expect = -1;
-    if (atomic_compare_exchange_strong_explicit(&mori_log_fd, &expect, nfd,
-                                                memory_order_relaxed,
-                                                memory_order_relaxed)) {
+    /* install only while the pair still reads (this pid, no fd) — the
+       pid halves match by construction, so a changed word is always a
+       sibling's installed fd */
+    const uint64_t want = mine | MORI_LOG_NO_FD;
+    while (cur == want &&
+           !atomic_compare_exchange_weak_explicit(&mori_log_state, &cur,
+                                                  mine | (uint32_t) nfd,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire))
+      ;
+    if (cur == want) {
       fd = nfd;
     } else {
       close(nfd);                          /* another thread's open won */
-      fd = expect;
+      fd = (int32_t) (uint32_t) cur;
     }
   }
   ssize_t w = write(fd, &rec, sizeof(rec));   /* O_APPEND: whole records */
@@ -317,9 +366,10 @@ static void mori_log_append(const char *name) {
 static void mori_log_release(void) {
   if (atomic_fetch_sub_explicit(&mori_log_live, 1, memory_order_relaxed) != 1)
     return;
-  if (atomic_load_explicit(&mori_log_pid, memory_order_relaxed) != getpid())
+  uint64_t cur = atomic_load_explicit(&mori_log_state, memory_order_acquire);
+  if ((cur & MORI_LOG_PID_MASK) != MORI_LOG_MINE)
     return;                                  /* pre-fork state: not our log */
-  int fd = atomic_load_explicit(&mori_log_fd, memory_order_relaxed);
+  int fd = (int32_t) (uint32_t) cur;
   if (fd < 0) return;
   if (atomic_load_explicit(&mori_log_dirty, memory_order_relaxed) <
       MORI_LOG_TRUNC_MIN)
@@ -342,16 +392,15 @@ static void mori_log_release(void) {
 __attribute__((destructor)) void mori_log_teardown(void) {
   if (atomic_load_explicit(&mori_log_live, memory_order_relaxed) != 0)
     return;
-  if (atomic_load_explicit(&mori_log_pid, memory_order_relaxed) != getpid())
+  uint64_t cur = atomic_load_explicit(&mori_log_state, memory_order_acquire);
+  if ((cur & MORI_LOG_PID_MASK) != MORI_LOG_MINE)
     return;
   char dir[PATH_MAX], path[PATH_MAX];
-  if (mori_log_dir(dir, sizeof(dir)) != 0) return;
-  int n = snprintf(path, sizeof(path), "%s/%s%x", dir,
-                   &MORI_PREFIX_LITERAL[1], (unsigned) getpid());
-  if (n <= 0 || (size_t) n >= sizeof(path)) return;
+  if (mori_log_path(dir, sizeof(dir), path, sizeof(path)) != 0) return;
   unlink(path);
   rmdir(dir);            /* succeeds once the last process's log is gone */
-  atomic_store_explicit(&mori_log_fd, -1, memory_order_relaxed);
+  atomic_store_explicit(&mori_log_state, MORI_LOG_MINE | MORI_LOG_NO_FD,
+                        memory_order_relaxed);
 }
 
 #endif /* __APPLE__ */
@@ -542,6 +591,38 @@ static int mori_create_fail(int fd, const char *name, int code) {
   return mori_err_classify(code);
 }
 
+/* See the internal header. MAP_FIXED over our own PROT_NONE reservation, slop
+   trimmed, so munmap(addr, size) remains the whole teardown. */
+void *mori_mmap_aligned(int fd, size_t size, int prot, int flags) {
+#ifdef __linux__
+  if (size >= MORI_HUGE_EXTENT) {
+    void *base = mmap(NULL, size + MORI_HUGE_EXTENT, PROT_NONE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base != MAP_FAILED) {
+      const uintptr_t lo = (uintptr_t) base;
+      const uintptr_t at = (lo + MORI_HUGE_EXTENT - 1) &
+                           ~(uintptr_t) (MORI_HUGE_EXTENT - 1);
+      void *addr = mmap((void *) at, size, prot, flags | MAP_FIXED, fd, 0);
+      if (addr != MAP_FAILED) {
+        /* the mapping covers whole pages: round the tail edge up before
+           the trim (munmap needs page-aligned addresses) */
+        const long ps = sysconf(_SC_PAGESIZE);
+        const size_t mapped =
+          ps > 0 ? (size + (size_t) ps - 1) / (size_t) ps * (size_t) ps : size;
+        const uintptr_t map_end = at + mapped;
+        const uintptr_t rsv_end = lo + size + MORI_HUGE_EXTENT;
+        if (at > lo) (void) munmap((void *) lo, at - lo);
+        if (rsv_end > map_end)
+          (void) munmap((void *) map_end, rsv_end - map_end);
+        return addr;
+      }
+      (void) munmap(base, size + MORI_HUGE_EXTENT);
+    }
+  }
+#endif
+  return mmap(NULL, size, prot, flags, fd, 0);
+}
+
 /* Create a new region under a fresh name. EEXIST means the name is held
    by an orphan from a crashed process that reused this PID — surfaced as
    an error rather than worked around: prune_shared() reclaims such
@@ -550,6 +631,7 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
 
   shm->addr = NULL;
   shm->size = 0;
+  shm->collapsed = 0;
 
   shm->pid = (unsigned int) getpid();
   shm->name_len = (uint8_t) mori_region_name(shm->name, sizeof(shm->name), shm->pid);
@@ -565,6 +647,80 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
     return mori_create_fail(fd, shm->name, errno);
 
 #ifdef __linux__
+  /* Fail fast when the region cannot fit in tmpfs: the reservation paths
+     below (posix_fallocate, MADV_POPULATE_WRITE) grind page-by-page
+     through every available byte before reporting ENOSPC/ENOMEM, so a
+     create that cannot fit — a boundary probe, a corrupt size — would
+     otherwise fill /dev/shm over seconds-to-minutes and leak the partial
+     allocation if the process dies mid-grind. statvfs is not a
+     reservation; the populate below still enforces it. */
+  struct statvfs sv;
+  if (fstatvfs(fd, &sv) == 0 &&
+      (uint64_t) size > (uint64_t) sv.f_bavail * sv.f_frsize)
+    return mori_create_fail(fd, shm->name, ENOSPC);
+#endif
+
+#if defined(__linux__) && defined(MADV_POPULATE_WRITE)
+  /* One reservation pass: MADV_POPULATE_WRITE faults the range writable,
+     allocating the tmpfs folios and installing the PTEs together — the
+     fallocate + MAP_POPULATE pair below walks the range twice. A full
+     tmpfs still fails here with ENOMEM at create: no write fault can
+     SIGBUS later. EINVAL means an old kernel (< 5.14): fall back. */
+  void *addr = mori_mmap_aligned(fd, size, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED);
+  if (addr == MAP_FAILED)
+    return mori_create_fail(fd, shm->name, errno);
+#ifdef MADV_HUGEPAGE
+  /* Ahead of the populate, so an advise/always host allocates the folios
+     at PMD granularity. Inert under the stock shmem_enabled=[never] —
+     the collapse sites are the real path there. */
+  if (size >= MORI_HUGE_EXTENT)
+    (void) madvise(addr, size, MADV_HUGEPAGE);
+#endif
+  int reserved = 0;
+  /* Huge-folio create (kernel >= 6.1; MADV_COLLAPSE is fallback-defined
+     above): touch one page per 2 MiB extent — a wholly-empty extent
+     fails the collapse (SCAN_TRUNCATED) — then collapse: the kernel
+     zero-fills each extent's holes into a fully-present huge folio, so
+     one fault per extent plus one madvise reserve the region where the
+     populate below faults once per page. A 0 return means the whole
+     extents are backed — no populate, and no write fault can SIGBUS
+     later. Any failure (EINVAL pre-6.1, ENOMEM on a failed huge
+     allocation) falls through to the populate, idempotent over
+     whatever did collapse. The extent-aligned mapping passes the
+     congruence gate; a partial tail stays for the populate. */
+  if (size >= MORI_HUGE_EXTENT) {
+    const size_t whole = size & ~(MORI_HUGE_EXTENT - 1);
+    volatile unsigned char *b = (volatile unsigned char *) addr;
+    for (size_t off = 0; off < whole; off += MORI_HUGE_EXTENT) b[off] = 0;
+    if (madvise(addr, whole, MADV_COLLAPSE) == 0) {
+      shm->collapsed = 1;
+      reserved = whole == size ||
+                 madvise((char *) addr + whole, size - whole,
+                         MADV_POPULATE_WRITE) == 0;
+    }
+  }
+  if (!reserved && madvise(addr, size, MADV_POPULATE_WRITE) != 0) {
+    int perr = errno;
+    munmap(addr, size);
+    if (perr != EINVAL)             /* tmpfs full: fail, do not retry */
+      return mori_create_fail(fd, shm->name, perr);
+    /* kernel < 5.14: the two-pass reservation */
+    int ferr = posix_fallocate(fd, 0, (off_t) size);
+    if (ferr != 0)
+      return mori_create_fail(fd, shm->name, ferr);
+    addr = mori_mmap_aligned(fd, size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED | MAP_POPULATE);
+    if (addr == MAP_FAILED)
+      return mori_create_fail(fd, shm->name, errno);
+#ifdef MADV_HUGEPAGE
+    if (size >= MORI_HUGE_EXTENT)   /* pages exist: khugepaged fodder */
+      (void) madvise(addr, size, MADV_HUGEPAGE);
+#endif
+  }
+  close(fd);
+#else
+#ifdef __linux__
   /* Reserve tmpfs pages now: ftruncate leaves the file sparse and tmpfs
      allocates only on write fault — SIGBUS if /dev/shm is full.
      MAP_POPULATE alone won't help: read prefault of a hole resolves to
@@ -575,16 +731,17 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
     return mori_create_fail(fd, shm->name, ferr);
 #endif
 
-  void *addr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_POPULATE, fd, 0);
+  void *addr = mori_mmap_aligned(fd, size, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED | MAP_POPULATE);
   if (addr == MAP_FAILED)
     return mori_create_fail(fd, shm->name, errno);
 
   close(fd);
 
 #ifdef MADV_HUGEPAGE
-  if (size >= 2 * 1024 * 1024)
-    madvise(addr, size, MADV_HUGEPAGE);
+  if (size >= MORI_HUGE_EXTENT)
+    (void) madvise(addr, size, MADV_HUGEPAGE);
+#endif
 #endif
   /* No MADV_WILLNEED on macOS: the region is written in full before use, so its
      pages fault in on demand — prefaulting would be a redundant pass + syscall. */
@@ -598,6 +755,7 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
 
   shm->addr = NULL;
   shm->size = 0;
+  shm->collapsed = 0;
   mori_shm_set_name(shm, name);
   shm->pid = 0;                      /* consumer: never the creator */
 
@@ -615,7 +773,7 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
      them), so populating only installs PTEs eagerly and defeats lazy
      access (reading 1 of 10 list elements would prefault the unread 9).
      Pages fault in on first touch. */
-  void *addr = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+  void *addr = mori_mmap_aligned(fd, size, PROT_READ, MAP_SHARED);
   if (addr == MAP_FAILED) {
     close(fd);
     return -1;
@@ -624,8 +782,8 @@ int mori_shm_open_stack(mori_shm *shm, const char *name) {
   close(fd);
 
 #ifdef MADV_HUGEPAGE
-  if (size >= 2 * 1024 * 1024)
-    madvise(addr, size, MADV_HUGEPAGE);
+  if (size >= MORI_HUGE_EXTENT)
+    (void) madvise(addr, size, MADV_HUGEPAGE);
 #endif
   /* No MADV_WILLNEED on macOS: the same eager PTE install MAP_POPULATE
      is omitted to avoid. */

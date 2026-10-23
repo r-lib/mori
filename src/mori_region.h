@@ -1,6 +1,6 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: db8ae7fe1457998e538427ac708f0f38cf330596 (commit db8ae7fe1457998e538427ac708f0f38cf330596, 2026-10-18T16:12:07+01:00)
+   Ref: 125adab6109e039e5ef44fbdf7dfbef513a9e2e5 (commit 125adab6109e039e5ef44fbdf7dfbef513a9e2e5, 2026-10-23T16:58:58+01:00)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
@@ -15,6 +15,12 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
+
+/* mode_t: mori_shm_os_open (the the internal header carve's POSIX-only decl; the
+   include lives above the carve boundary upstream). */
+#ifndef _WIN32
+#  include <sys/types.h>
+#endif
 
 /* Vendored static build: no export decoration. */
 #define MORI_API
@@ -235,6 +241,10 @@ typedef enum mori_type_e {
    a tscale attribute — verbatim nanosecond timestamps and durations */
 #define MORI_CAP_MORL_U64V (1u << 6) /**< reads MORL INT64 leaves carrying
    a u64 attribute — verbatim uint64 frame columns */
+#define MORI_CAP_LABELED (1u << 7)  /**< reads the labeled attribute
+   shapes: a 1-D names vector, a dim + dimnames array (the table class
+   included), and the extended frame dict (a class vector ending
+   "data.frame" plus extra attributes) */
 
 /** The identity word: the language in bits 0-7, the 32-bit capability mask
    in bits 32-63, bits 8-31 reserved — written zero and ignored by readers
@@ -267,6 +277,10 @@ struct mori_shm_s {
   char name[MORI_NAME_MAX];
   uint8_t name_len;
   unsigned int pid;            /**< creator PID: fork guard (POSIX only) */
+  uint8_t collapsed;           /**< Linux: whole 2 MiB extents of addr are
+                                    huge (set by a successful MADV_COLLAPSE;
+                                    one-way latch — a shared mapping's folios
+                                    are never split by mizu) */
 #ifdef _WIN32
   void *handle;
 #endif
@@ -507,8 +521,12 @@ MORI_EXT_INLINE int mori_ext_morl_elem_impl(const void *base, size_t size,
   memcpy(&loff, tab + 16 * (size_t) i, 8);
   memcpy(&lcount, tab + 16 * (size_t) i + 8, 8);
   /* a remote leaf (tag 33) carries a {0,0} / {0,-1} claim alone — a
-     bitmap offset is region-local and cannot describe a remote column */
-  if ((elem->sexptype & ~(int32_t) MORI_MORL_S4) == 33 && loff != 0)
+     bitmap offset is region-local and cannot describe a remote column.
+     STR / VEC / serialized leaves carry no table bitmap either: the
+     string block, the nested header, and the blob each speak for
+     themselves, and the writers stamp those rows {0,0} */
+  const int32_t ltag = elem->sexptype & ~(int32_t) MORI_MORL_S4;
+  if ((ltag == 33 || mori_type_elt_size(ltag) == 0) && loff != 0)
     return -1;
   if (!mori_ext_valid_ok(loff, lcount, (uint64_t) elem->length, size))
     return -1;
@@ -567,9 +585,27 @@ int mori_shm_open_stack(mori_shm *shm, const char *name);
    create_heap returns a mori_errcat; open_heap returns NULL on failure. */
 int mori_shm_create_heap(mori_shm **out, size_t size);
 mori_shm *mori_shm_open_heap(const char *name);
+/* The OS-level shm open (shm.c, POSIX only), shared by every open path:
+   Linux goes through /dev/shm directly to avoid the -lrt link dependency
+   that shm_open/shm_unlink would introduce; macOS has them in libc. */
+#ifndef _WIN32
+int mori_shm_os_open(const char *name, int flags, mode_t mode);
+#endif
 /* Unmaps only (never frees the struct); unlink != 0 also removes the
    name. The public mori_shm_close wraps this + free. */
 void mori_shm_close_stack(mori_shm *shm, int unlink);
+
+/* The THP extent MADV_COLLAPSE works in (the PMD unit): its congruence
+   gate validates each 2 MiB extent, so collapse lengths round down to
+   whole extents and collapse-worthy mappings must be extent-aligned. */
+#define MORI_HUGE_EXTENT ((size_t) 2 << 20)
+
+/* mmap `size` bytes of fd (offset 0) — extent-aligned on Linux (shm.c):
+   shmem hands out the kernel's unaligned pick under the stock
+   shmem_enabled=[never], which fails MADV_COLLAPSE's congruence gate.
+   The plain mmap off Linux, for sub-extent sizes, and on any reservation
+   failure: alignment is an optimization, never a failure mode. */
+void *mori_mmap_aligned(int fd, size_t size, int prot, int flags);
 
 /* The open forms' name copy: fixed-buffer truncate, always
    NUL-terminated, length stamped. */

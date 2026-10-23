@@ -31,8 +31,8 @@
 
 set -euo pipefail
 
-MIZU_PIN="5515fc0bc46728c00516cf32164c83614a9aa78c"    # mizu: Move mutable and cached package state to a private precious root
-LIBMIZU_PIN="db8ae7fe1457998e538427ac708f0f38cf330596" # libmizu: Accept no-sizes string_view exports in mizu_arrow_str_at
+MIZU_PIN="9e60f1570fb87bac82930931c98fe62eeb9fad9b"    # mizu: Re-vendor libmizu 125adab: timeout_ms single-sourcing, helper dedup, constant naming
+LIBMIZU_PIN="125adab6109e039e5ef44fbdf7dfbef513a9e2e5" # libmizu: Single-source mizu_timeout_ms, dedupe duplicated helpers, name magic constants
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/src"
@@ -158,6 +158,12 @@ if [ "$do_region" -eq 1 ]; then
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
+
+/* mode_t: mori_shm_os_open (the internal.h carve's POSIX-only decl; the
+   include lives above the carve boundary upstream). */
+#ifndef _WIN32
+#  include <sys/types.h>
+#endif
 
 /* Vendored static build: no export decoration. */
 #define MORI_API
