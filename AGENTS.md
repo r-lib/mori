@@ -31,7 +31,7 @@ rmarkdown::render("README.Rmd")                     # rebuild README.md
 ``` bash
 R CMD build .
 R CMD check --no-manual --compact-vignettes=gs+qpdf mori_*.tar.gz   # matches CI
-bash tools/vendor.sh                    # re-vendor both layers: region (shm.c, err_tls.c, mori_region.h) from libmizu, view (mori.h, altrep.c, serialize.c) from mizu
+bash tools/vendor.sh                    # re-vendor both layers: region (shm.c, mori_region.h) from libmizu, view (mori.h, altrep.c, serialize.c) from mizu
 bash tools/vendor.sh --region-only      # region layer only; --view-only for the view layer; --mizu/--libmizu override the refs
 ```
 
@@ -41,14 +41,18 @@ bash tools/vendor.sh --region-only      # region layer only; --view-only for the
 - R’s in-source build ignores header dependencies: after re-vendoring,
   `rm src/*.o src/*.so` before reinstalling — stale objects linked
   against old struct layouts cause sizeof mismatches and garbage fields.
-- `src/shm.c`, `src/err_tls.c` and `src/mori_region.h` are vendored from
-  libmizu by `tools/vendor.sh` (pinned ref, enumerated substitutions,
-  self-grep gate) — never edit them by hand; changes go upstream to
-  libmizu and are pulled by re-running the script. `mori_region.h` also
-  carries the carved wire-format helpers (`mori_mors_geometry`,
-  `mori_morh_validity_set`, `mori_na_build`, the MIZL directory-entry
-  reader `mori_morl_elem` and its chain, the type tags) the view layer
-  resolves onto.
+- `src/shm.c` and `src/mori_region.h` are vendored from libmizu by
+  `tools/vendor.sh` (pinned ref, enumerated substitutions, self-grep
+  gate) — never edit them by hand; changes go upstream to libmizu and
+  are pulled by re-running the script. shm.c vendors without its public
+  handle API (banner-to-EOF strip) and err_tls.c not at all: the view
+  layer drives the stack/heap ext tier and reads the `mori_shm` struct
+  fields directly, and the TLS error slot is embedder surface mori never
+  reads — region failures are reported via `mori_err_describe`.
+  `mori_region.h` also carries the carved wire-format helpers
+  (`mori_mors_geometry`, `mori_morh_validity_set`, `mori_na_build`, the
+  MIZL directory-entry reader `mori_morl_elem` and its chain, the type
+  tags) the view layer resolves onto.
 - `src/mori.h`, `src/altrep.c` and `src/serialize.c` — the view layer:
   the ALTREP consumer classes, the MORH/MORS/MORL layout oracle/writer,
   and the exact-size serialize streams — are vendored from **mizu** by
@@ -56,9 +60,18 @@ bash tools/vendor.sh --region-only      # region layer only; --view-only for the
   gate). The layouts have a single home: the canonical layer is
   first-class code in mizu and mori tracks it, so the byte format cannot
   drift between the two packages. Never edit these files by hand either;
-  changes go upstream to mizu. Unless `--libmizu` is given, the region
-  layer’s ref is derived from the libmizu pin recorded in mizu’s own
-  `src/vendor/libmizu/VENDOR` — the pairing mizu was built against.
+  changes go upstream to mizu. After substitution the script strips the
+  embedder-only surface mori never calls (anchored range deletes plus a
+  carve gate; see the carve block in `tools/vendor.sh`): the u64 landing
+  class, the attrs interchange parse/match island, the hook setters, the
+  remote-leaf directory walk, `mori_release_now`, `mori_altrep_fini`,
+  the exported layout wrappers
+  (`mori_layout_size`/`mori_layout_size_sums`), and the strict
+  `mori_is_int64`. What remains of the embedder hooks is the typedefs
+  and always-NULL statics that live code reads. Unless `--libmizu` is
+  given, the region layer’s ref is derived from the libmizu pin recorded
+  in mizu’s own `src/vendor/libmizu/VENDOR` — the pairing mizu was built
+  against.
 
 ## Storage Model
 
@@ -100,10 +113,10 @@ bash tools/vendor.sh --region-only      # region layer only; --view-only for the
   a fresh region; existing regions are never mutated. No locking
   anywhere — any change admitting in-place mutation breaks the model.
 - Names embed creator PID + randomly-seeded per-process counter
-  (`mori_<pid>_<counter>`, `mori_region_name`). `mori_shm_create` uses
-  `O_EXCL` / `ERROR_ALREADY_EXISTS`; a collision (orphan of a crashed
-  same-PID process) is an error (`MORI_ERRCAT_EXISTS`), never worked
-  around by reuse.
+  (`mori_<pid>_<counter>`, `mori_region_name`). `mori_shm_create_heap`
+  uses `O_EXCL` / `ERROR_ALREADY_EXISTS`; a collision (orphan of a
+  crashed same-PID process) is an error (`MORI_ERRCAT_EXISTS`), never
+  worked around by reuse.
 - [`prune_shared()`](https://mori.r-lib.org/reference/prune_shared.md)
   clears such orphans; it must run while the PID is free — a live
   process cannot reap its own names.
@@ -148,50 +161,49 @@ in the size pass that a clean (NA-free) write never spends — there the
 write returns the actual bytes used, always ≤ the size pass; on the host
 path (`foreign = 0`) the two agree exactly.
 
-## Embedder C API
+## C-Level Surface
 
-Declared in `mori.h`, C-level only (not `.Call`) — for packages
-embedding mori layouts under their own SHM management:
+Declared in `mori.h`, C-level only (not `.Call`). mori is the consumer
+here, not an embedder target: the full embedder API lives upstream in
+mizu, and `tools/vendor.sh` strips the parts mori never calls (see the
+vendoring note above). What remains:
 
-- **Layout oracle + writer**: `mori_layout_size(x, foreign)` → region
-  size, or 0 for what the writer must not take (ALTREP nodes that are
-  neither mori views nor directly readable with no keeper chain —
-  `mori_altrep_readable`; R’s S4 data-part wrappers qualify). The S4
-  object bit rides the layouts: header flags word at offset 32
-  (`MORI_FLAG_S4`) for MORH/MORS/MORL roots and nested lists, bit 30 of
-  the directory entry’s `sexptype` (`MORI_ELEM_S4`) for vector/string
-  leaves; applied with `Rf_asS4` after attributes land. Vetoes ride the
-  size recursion (`mori_layout_size_impl` with `ok != NULL`); the host
-  path passes `NULL` and vetoes nothing.
-  `mori_layout_write(base, x, foreign)` returns the actual bytes
-  written: exactly `mori_layout_size` when `foreign == 0`, at most that
-  in the foreign staging mode (clean leaves’ unspent validity reserve);
-  it zeroes reserved header bytes \[24-63\] on every write (embedders
-  may recycle regions). `foreign = 1` relaxes the ALTREP veto (admitted
-  atomic ALTREPs copy through `*_GET_REGION`, never materializing the
-  sender’s vector) and builds the validity-bitmap sections.
+- **Layout writer (internal)**:
+  `mori_layout_size_impl(x, ok, foreign, sp)` /
+  `mori_layout_write(base, x, foreign)` — the exported wrappers are
+  stripped; `mori_create` drives the impl directly. The S4 object bit
+  rides the layouts: header flags word at offset 32 (`MORI_FLAG_S4`) for
+  MORH/MORS/MORL roots and nested lists, bit 30 of the directory entry’s
+  `sexptype` (`MORI_ELEM_S4`) for vector/string leaves; applied with
+  `Rf_asS4` after attributes land. The `ok`/`sp` veto machinery and the
+  `foreign = 1` staging mode (validity sections, `*_GET_REGION` copies
+  of admitted ALTREP atomics) are retained but dead in mori (`ok`/`sp`
+  always NULL, `foreign` always 0) — they are excluded from coverage
+  (`tools/coverage-exclusions.R`), not carved, being interleaved with
+  live code. `mori_layout_write` returns the actual bytes written:
+  exactly the size pass when `foreign == 0`, at most that in the foreign
+  staging mode (clean leaves’ unspent validity reserve); it zeroes
+  reserved header bytes \[24-63\] on every write (embedders may recycle
+  regions).
 - **Wrap constructors**: `mori_vec_wrap` / `mori_str_wrap` /
-  `mori_list_wrap` build views over embedder memory, pinning `keeper`
-  via the data1 extptr’s protected slot; each takes a `release`
-  once-hook (see Internal State). `mori_restore_attrs` reapplies a
-  trailing attribute blob: the embedder’s encoding via the read hook
-  when the blob’s first byte is the ‘I’ interchange magic
-  (`MORI_INTEROP_MAGIC`), else `R_Unserialize`.
+  `mori_list_wrap` build views over memory, pinning `keeper` via the
+  data1 extptr’s protected slot; each takes a `release` once-hook (see
+  Internal State — never armed in mori). `mori_restore_attrs` reapplies
+  a trailing attribute blob: the read hook’s encoding when the blob’s
+  first byte is the ‘I’ interchange magic (`MORI_INTEROP_MAGIC`), else
+  `R_Unserialize`.
 - **Introspection + resolve**: `mori_view_check`, `mori_shm_name`,
   `mori_parse_id`, `mori_walk_path` (walks an index path over an open
   region; the caller’s keeper flows into the result’s chain),
-  `mori_is_int64` / `mori_is_int64_any`, `mori_resolve_id(id, keeper)`
-  (the one identifier resolve path: parse, open-or-cache, wrap root or
-  walk, fire the resolve hook; a non-NULL `keeper` composes behind a
-  fresh chain terminus), `mori_release_now(x)` (fires a view’s armed
-  release hook ahead of GC; once-only).
-- **Hooks**: `mori_set_wire_hooks(emit, resolve)` — see Serialization
-  Hooks. `mori_set_attrs_hooks(size, write, read)` — embedder
-  attribute-blob encoding (e.g. the ‘I’ interchange stream); a zero
-  `size` return declines and the blob falls back to an R_Serialize
-  stream (a decline after a nonzero size is a bug, never a fallback).
-  `mori_set_open_hook` — custom consumer open (e.g. page-0-RW for a
-  refcount protocol).
+  `mori_is_int64_any`, `mori_resolve_id(id, keeper)` (the one identifier
+  resolve path: parse, open-or-cache, wrap root or walk, fire the
+  resolve hook — always a no-op in mori; a non-NULL `keeper` composes
+  behind a fresh chain terminus), `mori_refable`, `mori_remote_id`,
+  `mori_chain_shm`, `mori_path_entry`.
+- **Hooks**: the wire/open/attrs hook typedefs and statics remain and
+  are read on the hot paths (`mori_emit_hook`, `mori_resolve_hook`,
+  `mori_open_hook`, the attrs blob hooks) — always NULL in mori since
+  the setters are stripped.
 
 ## ALTREP Classes
 
@@ -238,12 +250,13 @@ All classes register `Serialized_state` + `Unserialize`.
   path, fire the resolve hook); the walk’s intermediates step via
   `mori_make_extptr` (bare keeper-chain extptrs, no ALTLIST/attrs —
   never observed), leaf via `mori_unwrap_element`.
-- **Wire hooks** (`mori_set_wire_hooks`, set once at embedder load):
-  `emit(view)` fires from `Serialized_state` when an identifier (not a
-  materialization) is emitted; `resolve(view, shm)` fires after the wrap
-  inside `mori_resolve_id` — not `mori_walk_path`, whose direct callers
-  fire their own. Supports a cross-process lifetime protocol: flag
-  regions on escape, count remote references on arrival.
+- **Wire hooks**: `emit(view)` fires from `Serialized_state` when an
+  identifier (not a materialization) is emitted; `resolve(view, shm)`
+  fires after the wrap inside `mori_resolve_id` — not `mori_walk_path`,
+  whose direct callers fire their own. Never fires in mori: the setters
+  are stripped at vendoring (mizu sets them at embedder load for its
+  cross-process lifetime protocol: flag regions on escape, count remote
+  references on arrival).
 
 Fallback to full materialization when: data2 is set (COW’d), or nesting
 exceeds `MORI_MAX_PATH` (64).
@@ -347,14 +360,16 @@ leaf (the tag carries the class — no attrs blob); `33` → remote leaf
 identifier — name with optional index path, 1-255 bytes — resolved by
 reference through the consumer open + path walk, with the entry’s
 length/attrs/NA claims cross-checked against the referenced region;
-read-side only, no mori writer emits it, and the S4 bit is never set);
-other → raw zero-copy data, with bit 30 of `sexptype` (`MORI_ELEM_S4`)
-flagging an S4 leaf (masked off at read). Non-VECSXP attrs sit at
-`data_offset + data_size - attrs_size`. The foreign-mode validity tail:
-one LSB-first bitmap per NA-capable atomic leaf (1 = present, spent only
-where NAs are present), then an n-entry table of {i64 offset, i64 null
-count} pairs the header’s validity words point at; a VECSXP/STRSXP
-leaf’s pair is {0,0} (the nested header / string block carries its own).
+`mori_nested_write` emits it when a list being shared holds an
+already-shared, attribute-free view as an element (`mori_refable`), and
+the S4 bit is never set); other → raw zero-copy data, with bit 30 of
+`sexptype` (`MORI_ELEM_S4`) flagging an S4 leaf (masked off at read).
+Non-VECSXP attrs sit at `data_offset + data_size - attrs_size`. The
+foreign-mode validity tail: one LSB-first bitmap per NA-capable atomic
+leaf (1 = present, spent only where NAs are present), then an n-entry
+table of {i64 offset, i64 null count} pairs the header’s validity words
+point at; a VECSXP/STRSXP leaf’s pair is {0,0} (the nested header /
+string block carries its own).
 
 **MORS — ALTSTRING.** Header + string block + optional trailing attrs.
 
@@ -416,12 +431,12 @@ form for sub-objects).
 
 ### Keeper chain
 
-- **Host**: `mori_shm_create` mmaps (POSIX fd closed after mmap);
+- **Host**: `mori_shm_create_heap` mmaps (POSIX fd closed after mmap);
   `mori_make_result` splits ownership — ALTREP gets the mapping
   (`mori_shm_tag` extptr), the host unlink extptr is chained as its
   `prot`. Both finalizers run at GC; `R_RegisterCFinalizerEx(..., TRUE)`
   covers session exit.
-- **Consumer**: `mori_shm_open` maps read-only (never unlinks).
+- **Consumer**: `mori_shm_open_heap` maps read-only (never unlinks).
   Prefix-opened lists: shm extptr → root view extptr (index -1) → data1;
   `Elt` sub-lists chain through parent views. Path-form: intermediates
   are bare extptrs, only the leaf gets an ALTLIST. Element vec/str
@@ -444,17 +459,16 @@ form for sub-objects).
 ## Code Organization
 
 The view layer (`src/mori.h`, `src/altrep.c`, `src/serialize.c`) is
-vendored from mizu and the region layer (`src/shm.c`, `src/err_tls.c`,
+vendored from mizu and the region layer (`src/shm.c`,
 `src/mori_region.h`) from libmizu, both by `tools/vendor.sh` — all
 generated, never edited here; the bullets describe the vendored content.
 
 - **src/mori.h** — types (`mori_shm` incl. creator `pid`, `mori_buf`,
-  `mori_owned`, `mori_vec`, `mori_list_view`, `mori_str_geom`), embedder
-  API declarations (incl. `mori_set_open_hook` / `mori_set_attrs_hooks`
-  / `mori_set_wire_hooks`, `mori_resolve_id`, `mori_release_now` — mori
-  itself registers none of the hooks), constants (`MORI_MAGIC_*`,
-  `MORI_HEADER_SIZE`, `MORI_TAG_*`, grammar bounds,
-  `MORI_PREFIX_LITERAL`, `MORI_CACHE_MAX`,
+  `mori_owned`, `mori_vec`, `mori_list_view`, `mori_str_geom`), the
+  retained C-level declarations (`mori_layout_write`, wrap constructors,
+  `mori_resolve_id`, `mori_walk_path`, hook typedefs — the setters are
+  stripped), constants (`MORI_MAGIC_*`, `MORI_HEADER_SIZE`,
+  `MORI_TAG_*`, grammar bounds, `MORI_PREFIX_LITERAL`, `MORI_CACHE_MAX`,
   `MORI_FLAGS_OFF`/`MORI_FLAG_S4`, `MORI_ELEM_S4`, `MORI_TYPE_INT64`),
   `MORI_ALIGN64`, `mori_sizeof_elt`, `mori_flags_known`,
   `mori_str_geometry`/`mori_str_valid` (wrapping the region header’s
@@ -466,15 +480,18 @@ generated, never edited here; the bullets describe the vendored content.
   (`mori_type_e`, `MORI_TYPE_INT64`) and NA sentinels, binding-tier
   constants (`MORI_ZC_FLOOR`, `MORI_OPEN_CACHE_MAX`,
   `MORI_INTEROP_MAGIC`, the language/capability registries), the
-  `mori_shm` struct + region API decls, and the carved layout helpers
-  the view layer delegates to (`mori_mors_geometry`,
-  `mori_morh_validity_set`, `mori_na_build`, and the bounds-checked MIZL
-  directory-entry reader `mori_morl_elem` with its `mori_morl_entry`
-  struct and `mori_ext_morl_ent` / `mori_ext_morl_tag_ok` /
-  `mori_ext_valid_ok` / `mori_ext_flags_known` / `mori_type_elt_size`
-  chain — `MORI_EXT_INLINE` static inlines over `MORI_REGION_ALIGN64`
-  arithmetic).
-- **src/shm.c** — platform SHM create/open/close + finalizers.
+  `mori_shm` struct + the region ext-tier decls (stack/heap create/open,
+  close, host release, reap — the public handle API is not vendored;
+  `MORI_COLD` is re-established in the preamble for shm.c’s cold paths),
+  and the carved layout helpers the view layer delegates to
+  (`mori_mors_geometry`, `mori_morh_validity_set`, `mori_na_build`, and
+  the bounds-checked MIZL directory-entry reader `mori_morl_elem` with
+  its `mori_morl_entry` struct and `mori_ext_morl_ent` /
+  `mori_ext_morl_tag_ok` / `mori_ext_valid_ok` / `mori_ext_flags_known`
+  / `mori_type_elt_size` chain — `MORI_EXT_INLINE` static inlines over
+  `MORI_REGION_ALIGN64` arithmetic).
+- **src/shm.c** — platform SHM create/open/close (stack/heap ext tier;
+  the public handle API is stripped at vendoring) + finalizers.
   `mori_shm_reap` enumerates the platform name source (`/dev/shm` on
   Linux; per-user registry dir on macOS — see Platform Notes),
   classifies by embedded PID (`mori_pid_alive`), feeds
@@ -484,9 +501,6 @@ generated, never edited here; the bullets describe the vendored content.
   is the single unlink seam. Errors: `mori_err_classify` maps native
   errno/GetLastError → `MORI_E*` **before** any close/unlink clobbers
   it; `mori_err_describe` → summary + remediation hint.
-- **src/err_tls.c** — the thread-local error slot behind
-  `mori_last_error_category` / `mori_last_error_message` for handle-free
-  entry points (regions, prune).
 - **src/serialize.c** — `mori_serialize_count` / `mori_serialize_into` /
   `mori_unserialize_from`: fallback MORL entries (`sexptype == 0`) and
   (unless the attrs hooks take them) attributes.
@@ -512,9 +526,23 @@ testthat edition 3; `tests/testthat.R` entry point;
 `skip_on_cran` or env vars. `test-corruption.R` hand-crafts malformed
 regions byte-by-byte and is layout-sensitive by design — it must track
 the layouts above (directory entries 64-byte aligned; the string block
-in the Arrow-shaped form via its `str_block` helper). Those cases run
-only on Linux (file-backed `/dev/shm`), so macOS local runs skip them —
-CI’s Ubuntu jobs are the ones that exercise them.
+in the Arrow-shaped form via its `str_block` helper; tag-33 remote
+leaves via `TAG_REF`/`morl_header_v`; serialized payloads are R’s
+**native** binary format — `serialize(..., xdr = FALSE)` — matching the
+package’s streams). Those cases run only on Linux (file-backed
+`/dev/shm`), so macOS local runs skip them — CI’s Ubuntu jobs are the
+ones that exercise them.
+
+Coverage: covr instruments the compiled C, so the vendored layer
+dominates the report. The workflow sources
+`tools/coverage-exclusions.R`, which computes `line_exclusions` from
+text anchors (not line numbers — they track re-vendoring) for the code
+mori cannot execute: the `foreign = 1` staging branches, the `ok`/`sp`
+veto walk, the Get_region methods (unreachable while `Dataptr_or_null`
+returns the SHM pointer), list `Dataptr` (never called on VECSXP),
+always-NULL hook branches, and the write-unwind failure arm. An anchor
+that stops matching fails the coverage workflow — update the anchors or
+the carve when re-vendoring changes these regions.
 
 ## Platform Notes
 
