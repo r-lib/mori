@@ -5,7 +5,7 @@ template:
 
   opengraph:
     image:
-      src: https://raw.githubusercontent.com/r-lib/mori/main/dev/images/mori.png
+      src: og-image.png
       alt: "mori"
 
   includes:
