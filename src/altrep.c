@@ -73,8 +73,6 @@ typedef struct {
   int64_t length;
 } mori_elem;
 
-// SHM eligibility: any atomic vector (attributes stored separately) ---------
-
 static inline int mori_shm_eligible(int type) {
   return type == REALSXP || type == INTSXP || type == LGLSXP ||
          type == RAWSXP || type == CPLXSXP || type == STRSXP;
@@ -92,8 +90,6 @@ static inline void *mori_data_ptr(SEXP x) {
   default:       return (void *) DATAPTR_RO(x);
   }
 }
-
-// Bounds check for a [offset, offset+size) chunk within a region -------------
 
 static inline int mori_oob(int64_t offset, int64_t size, int64_t region_size) {
   return offset < 0 || size < 0 || offset > region_size - size;
@@ -1459,7 +1455,6 @@ static size_t mori_nested_write(unsigned char *base, SEXP x, int foreign) {
     free(tab);
   }
 
-  /* Write header */
   uint32_t magic = MORI_MAGIC_LIST;
   int32_t n32 = (int32_t) n;
   int64_t as64 = (int64_t) attrs_size;

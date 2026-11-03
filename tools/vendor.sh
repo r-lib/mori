@@ -40,8 +40,8 @@
 
 set -euo pipefail
 
-MIZU_PIN="9e60f1570fb87bac82930931c98fe62eeb9fad9b"    # mizu: Re-vendor libmizu 125adab: timeout_ms single-sourcing, helper dedup, constant naming
-LIBMIZU_PIN="125adab6109e039e5ef44fbdf7dfbef513a9e2e5" # libmizu: Single-source mizu_timeout_ms, dedupe duplicated helpers, name magic constants
+MIZU_PIN="7efb986e4af9c1778a2376baf4951bfddb10e5cd"    # mizu: Vendor libmizu 6c87ad3 (const getters record through the error shadow)
+LIBMIZU_PIN="6c87ad3cdef71f6793975e6492395266f27dc281" # libmizu: Record the const snapshot getters through the error shadow; bound the split-threads test's window
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/src"
@@ -191,6 +191,23 @@ if [ "$do_region" -eq 1 ]; then
    include lives above the carve boundary upstream). */
 #ifndef _WIN32
 #  include <sys/types.h>
+#endif
+
+/* MADV_POPULATE_WRITE / MADV_COLLAPSE: fixed kernel ABI, but the names
+   postdate some shipping libc headers (glibc 2.35 and 2.37; a
+   manylinux_2_28 build host has neither). Upstream fallback-defines them
+   in the internal header, above the carve boundary, after <sys/mman.h>;
+   re-established here so every TU compiles the same paths. Support is a
+   kernel property, probed at run time — an older kernel EINVALs into the
+   create's fallbacks. */
+#if defined(__linux__)
+#  include <sys/mman.h>
+#  ifndef MADV_POPULATE_WRITE
+#    define MADV_POPULATE_WRITE 23   /* kernel >= 5.14 */
+#  endif
+#  ifndef MADV_COLLAPSE
+#    define MADV_COLLAPSE 25         /* kernel >= 6.1 */
+#  endif
 #endif
 
 /* Vendored static build: no export decoration. */

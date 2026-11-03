@@ -1,6 +1,6 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: 125adab6109e039e5ef44fbdf7dfbef513a9e2e5 (commit 125adab6109e039e5ef44fbdf7dfbef513a9e2e5, 2026-10-23T16:58:58+01:00)
+   Ref: 6c87ad3cdef71f6793975e6492395266f27dc281 (commit 6c87ad3cdef71f6793975e6492395266f27dc281, 2026-11-03T22:59:44Z)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
@@ -20,6 +20,23 @@
    include lives above the carve boundary upstream). */
 #ifndef _WIN32
 #  include <sys/types.h>
+#endif
+
+/* MADV_POPULATE_WRITE / MADV_COLLAPSE: fixed kernel ABI, but the names
+   postdate some shipping libc headers (glibc 2.35 and 2.37; a
+   manylinux_2_28 build host has neither). Upstream fallback-defines them
+   in the internal header, above the carve boundary, after <sys/mman.h>;
+   re-established here so every TU compiles the same paths. Support is a
+   kernel property, probed at run time — an older kernel EINVALs into the
+   create's fallbacks. */
+#if defined(__linux__)
+#  include <sys/mman.h>
+#  ifndef MADV_POPULATE_WRITE
+#    define MADV_POPULATE_WRITE 23   /* kernel >= 5.14 */
+#  endif
+#  ifndef MADV_COLLAPSE
+#    define MADV_COLLAPSE 25         /* kernel >= 6.1 */
+#  endif
 #endif
 
 /* Vendored static build: no export decoration. */
@@ -48,8 +65,8 @@ typedef struct mori_shm_s mori_shm;
 
 /** The verb result. MORI_FULL: ring/slot capacity exhausted (try-send).
    MORI_TIMEOUT: deadline passed. MORI_CLOSED: orderly close. MORI_PEER_GONE:
-   the peer's liveness lock is released (the death verdict; listeners are
-   wake triggers only). MORI_ERR: a real error — category + message. */
+   the peer's liveness lock is released (the death verdict; listeners are wake
+   triggers only). MORI_ERR: a real error, with a category and a message. */
 typedef enum mori_status_e {
   MORI_OK = 0,
   MORI_FULL,
@@ -79,62 +96,59 @@ typedef enum mori_errcat_e {
 
 /** Region magics (first 4 bytes): atomic vector, string vector, list tree.
    Every layout opens with a 64-byte header; bytes [24-63] were reserved
-   (written zero) — the zc protocol owns [24-31], and the two words below
-   are now assigned: the format flags word and the validity section.
+   (written zero). The zc protocol owns [24-31], and the two words below are now
+   assigned: the format flags word and the validity section.
 
-   Header bytes [32-35] are the format flags word. Bit 0 is the S4 object
-   bit, which the layouts otherwise cannot carry; every other bit is
-   reserved zero. This is a format word, not a negotiation word: a reader
-   rejects a set bit it does not know as a corrupt or newer region (the
-   identity word's reserved bits are the opposite — ignored). */
+   Header bytes [32-35] are the format flags word. Bit 0 is the S4 object bit,
+   which the layouts otherwise cannot carry; every other bit is reserved zero.
+   This is a format word, not a negotiation word: a reader rejects a set bit it
+   does not know as a corrupt or newer region (the identity word's reserved bits
+   are the opposite: ignored). */
 #define MORI_HDR_FLAGS_OFF ((size_t) 32)
 #define MORI_HDR_FLAG_S4   1u
 
-/** Header bytes [40-47] and [48-55] are the optional validity-bitmap
-   section of every MORH and MORL header (nested MORL included; MORS
-   carries its bitmap in the string block instead): an i64 offset and an
-   i64 null count, three states. {0, 0}: absent — a pre-section region,
-   the core's flat reserve, or a same-language write; the reader's lazy
-   fallback. {0, -1}: known-NA-free (no section materialized). Else the
-   offset of a 64-byte-aligned section: for MORH a ceil(n / 8)-byte
-   LSB-first bitmap (1 = present, the MORS string block's convention);
-   for MORL a table of n {i64 offset, i64 null count} leaf entries, one
-   per directory entry — a VECSXP or STRSXP entry's pair is {0, 0} (the
-   nested header / the string block carries its own), and [48-55] is the
-   total null count across that header's remaining leaves. Reserved-zero
-   means absent, so a pre-dating reader simply never looks; the section
-   needs no capability bit. When the pair is not {0, 0} the section is the
-   authoritative null record: the in-band sentinels are the null-slot fill,
-   and a writer emitting a section writes the wire type's sentinel at every
-   clear bit (DESIGN.md's validity-as-data rules are normative). */
+/** Header bytes [40-47] and [48-55] are the optional validity-bitmap section of
+   every MORH and MORL header (nested MORL included; MORS carries its bitmap in
+   the string block instead): an i64 offset and an i64 null count, three states.
+   {0, 0}: absent (a pre-section region, the core's flat reserve, or a
+   same-language write), the reader's lazy fallback. {0, -1}: known-NA-free (no
+   section materialized). Else the offset of a 64-byte-aligned section: for MORH
+   a ceil(n / 8)-byte LSB-first bitmap (1 = present, the MORS string block's
+   convention); for MORL a table of n {i64 offset, i64 null count} leaf entries,
+   one per directory entry; a VECSXP or STRSXP entry's pair is {0, 0} (the
+   nested header / the string block carries its own), and [48-55] is the total
+   null count across that header's remaining leaves. Reserved-zero means absent,
+   so a pre-dating reader never looks; the section needs no capability bit. When
+   the pair is not {0, 0} the section is the authoritative null record: the
+   in-band sentinels are the null-slot fill, and a writer emitting a section
+   writes the wire type's sentinel at every clear bit (DESIGN.md's
+   validity-as-data rules are normative). */
 #define MORI_HDR_VALID_OFF   ((size_t) 40)
 #define MORI_HDR_VALID_COUNT ((size_t) 48)
 
-/** MORH (atomic vector): [4-7] i32 wire type, [8-15] i64 element count,
-   [16-23] i64 attrs blob size; bare element bytes at 64, the attrs blob
-   trailing. MORS (string vector): [4-7] i32 attrs blob size, [8-15] i64
-   string count, [16-23] i64 string-block byte size; the string block at
-   64, the attrs blob trailing it. The string block (also the form of an
-   MORL STRSXP leaf): a ceil(n / 8)-byte validity bitmap, (n + 1) i64
-   offsets, n encoding bytes (MORI_CE_*), and the packed string bytes —
-   each section 64-byte aligned from the block start. The first, second
-   and fourth are Arrow large_utf8's three buffers verbatim; the encoding
-   section is R's per-CHARSXP mark. MORL (list tree): [4-7] i32 element
-   count n, [8-15] i64 attrs blob offset, [16-23] i64 attrs blob size;
-   then n 32-byte directory entries, each { i64 data_offset (64-byte
-   aligned), i64 data_size, i32 sexptype, i32 attrs_size, i64 length }.
-   The entry's data is the bare element bytes (an atomic leaf), a string
-   block (STRSXP), a nested MORL (VECSXP) or a serialized stream
-   (sexptype 0); the leaf's attrs blob is the last attrs_size bytes of
-   data_size. Bit 30 of the entry's sexptype is the leaf's S4 bit; the
-   remainder is a listed tag — 0 (serialized), the atomic tags, STR, VEC,
-   and 32 (MORI_TYPE_INT64 is legal on MORL leaves). Tag 33 is a remote
-   leaf: the column lives in another region and crosses by reference.
-   data_offset / data_size hold the identifier span — the region name,
-   optionally name[i,j,...] with 1-based decimal indices, 1-255 bytes —
-   length and attrs_size describe the referenced column as resolved, the
-   S4 bit is never set, and the validity pair is a {0,0} / {0,-1} claim
-   alone (DESIGN.md's remote-leaf rules are normative). */
+/** MORH (atomic vector): [4-7] i32 wire type, [8-15] i64 element count, [16-23]
+   i64 attrs blob size; bare element bytes at 64, the attrs blob trailing. MORS
+   (string vector): [4-7] i32 attrs blob size, [8-15] i64 string count, [16-23]
+   i64 string-block byte size; the string block at 64, the attrs blob trailing
+   it. The string block (also the form of an MORL STRSXP leaf): a ceil(n /
+   8)-byte validity bitmap, (n + 1) i64 offsets, n encoding bytes (MORI_CE_*),
+   and the packed string bytes, each section 64-byte aligned from the block
+   start. The first, second and fourth are Arrow large_utf8's three buffers
+   verbatim; the encoding section is R's per-CHARSXP mark. MORL (list tree):
+   [4-7] i32 element count n, [8-15] i64 attrs blob offset, [16-23] i64 attrs
+   blob size; then n 32-byte directory entries, each { i64 data_offset (64-byte
+   aligned), i64 data_size, i32 sexptype, i32 attrs_size, i64 length }. The
+   entry's data is the bare element bytes (an atomic leaf), a string block
+   (STRSXP), a nested MORL (VECSXP) or a serialized stream (sexptype 0); the
+   leaf's attrs blob is the last attrs_size bytes of data_size. Bit 30 of the
+   entry's sexptype is the leaf's S4 bit; the remainder is a listed tag: 0
+   (serialized), the atomic tags, STR, VEC, and 32 (MORI_TYPE_INT64 is legal on
+   MORL leaves). Tag 33 is a remote leaf: the column lives in another region and
+   crosses by reference. data_offset / data_size hold the identifier span (the
+   region name, optionally name[i,j,...] with 1-based decimal indices, 1-255
+   bytes); length and attrs_size describe the referenced column as resolved, the
+   S4 bit is never set, and the validity pair is a {0,0} / {0,-1} claim alone
+   (DESIGN.md's remote-leaf rules are normative). */
 #define MORI_MORL_S4 0x40000000
 
 #define MORI_MAGIC_VEC   0x4D4F5248u  /**< "MORH" */
@@ -145,12 +159,11 @@ typedef enum mori_errcat_e {
 #define MORI_NAME_MAX 30  /**< fits Windows worst case + NUL; Darwin PSHMNAMLEN */
 
 
-/** Wire type tags, fixed by the wire format (RAWVEC aux, MIZU* layout
-   headers). Bindings map their own element types onto these. The numbers
-   are libmizu-owned and frozen from the first release: they descend from
-   R's SEXPTYPE space by history, never by dependency — a future SEXPTYPE
-   joins the wire only by an explicit allocation here, as INT64 = 32
-   already did. */
+/** Wire type tags, fixed by the wire format (RAWVEC aux, MIZU* layout headers).
+   Bindings map their own element types onto these. The numbers are
+   libmizu-owned and frozen from the first release: they descend from R's
+   SEXPTYPE space by history, not by dependency, and a future SEXPTYPE joins the
+   wire only by an explicit allocation here, as INT64 = 32 already did. */
 typedef enum mori_type_e {
   MORI_TYPE_LGL = 10,         /**< int32 logical; INT_MIN is the missing sentinel */
   MORI_TYPE_INT = 13,         /**< int32; INT_MIN is the missing sentinel */
@@ -196,9 +209,8 @@ typedef enum mori_type_e {
 /** The self-describing stream dispatch byte: payload byte 0 of an INLINE
    frame, where an R native stream carries 'B'/'X'. The core is
    codec-agnostic; DESIGN.md's codec registry allocates the magic bytes
-   ('R' = mizu, 'P' = pymizu). 'R' here and MORI_DROP_R share the letter
-   deliberately — both denote an R-binding payload, in disjoint
-   contexts. */
+   ('R' = mizu, 'P' = pymizu). 'R' here and MORI_DROP_R share the letter:
+   both denote an R-binding payload, in disjoint contexts. */
 #define MORI_CODEC_MAGIC 0x52u   /**< 'R' */
 #define MORI_PYMIZU_CODEC_MAGIC 0x50u   /**< 'P' */
 #define MORI_INTEROP_MAGIC 0x49u   /**< 'I': the interchange stream (DESIGN.md's
@@ -210,10 +222,10 @@ typedef enum mori_type_e {
    identity word, and each binding's handle-level peer_lang. Append-only:
    a value, once shipped, is never reassigned (the byte is
    equality-compared, so a reassignment fails behaviorally, as false join
-   rejections across mixed builds). 0 is "none" — no peer attached yet, a
-   pool no worker has joined — never a stored binding identity: a binding
-   whose identity word has a zero language byte is rejected at create,
-   attach and join. */
+   rejections across mixed builds). 0 is "none" (no peer attached yet, a
+   pool no worker has joined) and never a stored binding identity: a
+   binding whose identity word has a zero language byte is rejected at
+   create, attach and join. */
 #define MORI_LANG_NONE   0u
 #define MORI_LANG_BYTES  1u   /**< the core's bytes binding and test bindings */
 #define MORI_LANG_R      2u
@@ -222,9 +234,9 @@ typedef enum mori_type_e {
 /** Reader capabilities: a 32-bit mask, one bit per layout or format
    extension a reader implements beyond the baseline (MORH atomic and
    INT64 views, 'I' format 0x01 as specified in DESIGN.md's Interchange
-   codec section). Readers ignore bits they do not know — they never
-   reject them; absent means unsupported, and a writer stages a layout or
-   tag only for a peer that sets its bit. A bit names a byte layout, not a
+   codec section). Readers ignore bits they do not know rather than
+   rejecting them; absent means unsupported, and a writer stages a layout
+   or tag only for a peer that sets its bit. A bit names a byte layout, not a
    feature: an incompatible change to a gated layout, tag or shape
    allocates a new bit and retires the old, which is never reassigned.
    Features that always land together in every binding share a bit. */
@@ -245,9 +257,13 @@ typedef enum mori_type_e {
    shapes: a 1-D names vector, a dim + dimnames array (the table class
    included), and the extended frame dict (a class vector ending
    "data.frame" plus extra attributes) */
+#define MORI_CAP_ORDERED (1u << 8)  /**< reads ordered factors: the
+   factor attr shape whose class is the two-element strv
+   c("ordered", "factor") — on the 'I' inline form, the layout attribute
+   blob, and an Arrow frame's dictionary column */
 
 /** The identity word: the language in bits 0-7, the 32-bit capability mask
-   in bits 32-63, bits 8-31 reserved — written zero and ignored by readers
+   in bits 32-63, bits 8-31 reserved: written zero and ignored by readers
    (a negotiation word, so a later field needs no reader taught to skip
    it). The pool word's exact-match join compares the whole word. */
 #define MORI_IDENT(lang, caps) \
@@ -339,7 +355,7 @@ MORI_EXT_INLINE size_t mori_type_elt_size(int type) {
 
 /** One MORL directory entry plus its validity-table pair (mori_region.h documents
    the 32-byte entry): mori_morl_elem's out-param. sexptype is the wire
-   value — MORI_MORL_S4 is the S4 bit, the remainder a listed tag. */
+   value: MORI_MORL_S4 is the S4 bit, the remainder a listed tag. */
 typedef struct mori_morl_entry_s {
   int64_t data_offset;   /**< 64-byte aligned */
   int64_t data_size;
@@ -373,7 +389,7 @@ MORI_EXT_INLINE int mori_ext_valid_ok(int64_t off, int64_t count,
 
 
 /** A directory entry's sexptype: MORI_MORL_S4 masked off, the remainder a
-   listed tag — 0 (a serialized leaf), the atomic tags, STR, VEC, INT64,
+   listed tag: 0 (a serialized leaf), the atomic tags, STR, VEC, INT64,
    and the remote leaf (33). Anything else unlisted rejects. */
 MORI_EXT_INLINE int mori_ext_morl_tag_ok(int32_t sexptype) {
   switch (sexptype & ~(int32_t) MORI_MORL_S4) {
@@ -396,7 +412,7 @@ MORI_EXT_INLINE int mori_ext_morl_tag_ok(int32_t sexptype) {
 
 /** One per-element NA test per NA-capable wire type (anything else is
    never null): INT32_MIN for LGL and INT, INT64_MIN, and the NA_real_
-   payload discriminated from other NaNs — any NaN whose low word is
+   payload discriminated from other NaNs: any NaN whose low word is
    1954 (0x7A2), R's own ISNA test, so a writer's quiet-bit-clear
    NA_real_ (R's verbatim form) and the wire's quiet-bit-set twin both
    read as NA while a genuine NaN stays a value. The CPLX pair either
@@ -441,7 +457,7 @@ MORI_EXT_INLINE void mori_morh_validity_set(void *base, int64_t off,
 
 /** One MORL directory entry's checks, shared by mori_morl_check's pass and
    mori_morl_elem: alignment and extent, the attrs tail, the listed tag,
-   and the length against the leaf kind — the string block's fixed
+   and the length against the leaf kind: the string block's fixed
    sections for STR, the element extent for an atomic leaf. A remote leaf
    (tag 33) skips the attrs-tail and body checks: the span is the
    identifier (1–255 bytes), and length / attrs_size describe the
@@ -520,7 +536,7 @@ MORI_EXT_INLINE int mori_ext_morl_elem_impl(const void *base, size_t size,
   int64_t loff, lcount;
   memcpy(&loff, tab + 16 * (size_t) i, 8);
   memcpy(&lcount, tab + 16 * (size_t) i + 8, 8);
-  /* a remote leaf (tag 33) carries a {0,0} / {0,-1} claim alone — a
+  /* a remote leaf (tag 33) carries a {0,0} / {0,-1} claim alone: a
      bitmap offset is region-local and cannot describe a remote column.
      STR / VEC / serialized leaves carry no table bitmap either: the
      string block, the nested header, and the blob each speak for
@@ -631,10 +647,10 @@ void mori_log_teardown(void);
 void mori_shm_host_release(mori_shm *shm);
 
 
-/** Reap /mori_ orphans of dead creators. Returns a malloc'd array of
-   malloc'd names (free each, then the array), *n the count; NULL when
-   none — including on platforms that cannot enumerate the shm namespace
-   (Windows, where a mapping cannot outlive its creator). */
+/** Reap /mori_ orphans of dead creators. Returns a malloc'd array of malloc'd
+   names (free each, then the array), *n the count; NULL when none, including on
+   platforms that cannot enumerate the shm namespace (Windows, where a mapping
+   cannot outlive its creator). */
 MORI_API char **mori_shm_reap(int *n);
 
 

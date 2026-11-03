@@ -169,13 +169,6 @@ char **mori_shm_reap(int *n) {
 #define MAP_POPULATE 0
 #endif
 
-/* Linux 6.1's MADV_COLLAPSE postdates some shipping libc headers; the
-   number is fixed, and an older kernel EINVALs into the create's
-   populate fallback. */
-#if defined(__linux__) && !defined(MADV_COLLAPSE)
-#define MADV_COLLAPSE 25
-#endif
-
 #ifndef PATH_MAX
 #define PATH_MAX 1024
 #endif
@@ -225,7 +218,9 @@ int mori_shm_os_open(const char *name, int flags, mode_t mode) {
      that window would otherwise inherit it. */
   int fd = shm_open(name, flags, mode);
   if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+    int err = errno;   /* the caller classifies errno: keep it past close */
     close(fd);
+    errno = err;
     return -1;
   }
   return fd;
@@ -655,12 +650,15 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
      allocation if the process dies mid-grind. statvfs is not a
      reservation; the populate below still enforces it. */
   struct statvfs sv;
-  if (fstatvfs(fd, &sv) == 0 &&
+  /* f_blocks == 0 is an unlimited tmpfs (mounted size=0 / nr_blocks=0:
+     shmem_statfs leaves every block count at zero), where the probe has
+     nothing to say — without the guard it would reject every create */
+  if (fstatvfs(fd, &sv) == 0 && sv.f_blocks != 0 &&
       (uint64_t) size > (uint64_t) sv.f_bavail * sv.f_frsize)
     return mori_create_fail(fd, shm->name, ENOSPC);
 #endif
 
-#if defined(__linux__) && defined(MADV_POPULATE_WRITE)
+#if defined(__linux__)
   /* One reservation pass: MADV_POPULATE_WRITE faults the range writable,
      allocating the tmpfs folios and installing the PTEs together — the
      fallocate + MAP_POPULATE pair below walks the range twice. A full
@@ -679,7 +677,7 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
 #endif
   int reserved = 0;
   /* Huge-folio create (kernel >= 6.1; MADV_COLLAPSE is fallback-defined
-     above): touch one page per 2 MiB extent — a wholly-empty extent
+     in the internal header): touch one page per 2 MiB extent — a wholly-empty extent
      fails the collapse (SCAN_TRUNCATED) — then collapse: the kernel
      zero-fills each extent's holes into a fully-present huge folio, so
      one fault per extent plus one madvise reserve the region where the
@@ -691,9 +689,16 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
      congruence gate; a partial tail stays for the populate. */
   if (size >= MORI_HUGE_EXTENT) {
     const size_t whole = size & ~(MORI_HUGE_EXTENT - 1);
-    volatile unsigned char *b = (volatile unsigned char *) addr;
-    for (size_t off = 0; off < whole; off += MORI_HUGE_EXTENT) b[off] = 0;
-    if (madvise(addr, whole, MADV_COLLAPSE) == 0) {
+    /* The per-extent touch is a populate, not a store: a store faults
+       outside any reservation, and a tmpfs that filled since the probe
+       answers it with SIGBUS where the populate answers ENOMEM/EFAULT.
+       One page per extent (the length rounds up to a page). A populate
+       that fails (pre-5.14 EINVAL, a full tmpfs) skips the collapse —
+       the full populate below reports the real cause. */
+    int touched = 1;
+    for (size_t off = 0; touched && off < whole; off += MORI_HUGE_EXTENT)
+      touched = madvise((char *) addr + off, 1, MADV_POPULATE_WRITE) == 0;
+    if (touched && madvise(addr, whole, MADV_COLLAPSE) == 0) {
       shm->collapsed = 1;
       reserved = whole == size ||
                  madvise((char *) addr + whole, size - whole,
@@ -705,7 +710,10 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
     munmap(addr, size);
     if (perr != EINVAL)             /* tmpfs full: fail, do not retry */
       return mori_create_fail(fd, shm->name, perr);
-    /* kernel < 5.14: the two-pass reservation */
+    /* kernel < 5.14: the two-pass reservation. posix_fallocate allocates
+       the tmpfs pages (ftruncate leaves the file sparse, and MAP_POPULATE
+       alone read-faults holes onto the shared zero page without
+       allocating), then MAP_POPULATE installs the PTEs. */
     int ferr = posix_fallocate(fd, 0, (off_t) size);
     if (ferr != 0)
       return mori_create_fail(fd, shm->name, ferr);
@@ -720,17 +728,6 @@ int mori_shm_create_stack(mori_shm *shm, size_t size) {
   }
   close(fd);
 #else
-#ifdef __linux__
-  /* Reserve tmpfs pages now: ftruncate leaves the file sparse and tmpfs
-     allocates only on write fault — SIGBUS if /dev/shm is full.
-     MAP_POPULATE alone won't help: read prefault of a hole resolves to
-     the shared zero page without allocating. posix_fallocate returns
-     errno directly. */
-  int ferr = posix_fallocate(fd, 0, (off_t) size);
-  if (ferr != 0)
-    return mori_create_fail(fd, shm->name, ferr);
-#endif
-
   void *addr = mori_mmap_aligned(fd, size, PROT_READ | PROT_WRITE,
                                  MAP_SHARED | MAP_POPULATE);
   if (addr == MAP_FAILED)
