@@ -1,6 +1,6 @@
 /* Generated from libmizu by tools/vendor.sh — do not edit.
    Upstream: https://github.com/shikokuchuo/libmizu
-   Ref: 6c87ad3cdef71f6793975e6492395266f27dc281 (commit 6c87ad3cdef71f6793975e6492395266f27dc281, 2026-11-03T22:59:44Z)
+   Ref: v0.1.0 (commit 5012d52cf7dfe5e3adb28288b51423d742b1cbb7, 2026-11-04T17:31:38Z)
 
    The shared-memory region layer of mori, vendored from libmizu: region
    create/map/unlink over POSIX shm / Win32 file mappings, plus the region
@@ -623,15 +623,20 @@ void mori_shm_close_stack(mori_shm *shm, int unlink);
    failure: alignment is an optimization, never a failure mode. */
 void *mori_mmap_aligned(int fd, size_t size, int prot, int flags);
 
-/* The open forms' name copy: fixed-buffer truncate, always
-   NUL-terminated, length stamped. */
-static inline MORI_MAYBE_UNUSED void mori_shm_set_name(mori_shm *shm,
-                                                      const char *name) {
+/* The open forms' name copy: NUL-terminated, length stamped. A name past
+   the buffer is refused (-1) rather than truncated — a truncated copy
+   would open the caller's region but name another at close-with-unlink.
+   The public open wrappers record their own message on the refusal, so
+   no errno is set. Wire-carried names are bounded by their validators;
+   this guards the public region verbs. */
+static inline MORI_MAYBE_UNUSED int mori_shm_set_name(mori_shm *shm,
+                                                     const char *name) {
   size_t nl = strlen(name);
-  if (nl >= sizeof(shm->name)) nl = sizeof(shm->name) - 1;
+  if (nl >= sizeof(shm->name)) return -1;
   memcpy(shm->name, name, nl);
   shm->name[nl] = '\0';
   shm->name_len = (uint8_t) nl;
+  return 0;
 }
 
 /* macOS registry-log exit/unload hook (shm.c; defined under __APPLE__
@@ -650,7 +655,11 @@ void mori_shm_host_release(mori_shm *shm);
 /** Reap /mori_ orphans of dead creators. Returns a malloc'd array of malloc'd
    names (free each, then the array), *n the count; NULL when none, including on
    platforms that cannot enumerate the shm namespace (Windows, where a mapping
-   cannot outlive its creator). */
+   cannot outlive its creator). The creator-liveness probe is a same-PID-
+   namespace signal probe: a shm namespace shared across PID namespaces (a
+   container's --ipc=host, a shared /dev/shm mount) reads another namespace's
+   live creators as dead, so reap only from the namespace that created the
+   regions. */
 MORI_API char **mori_shm_reap(int *n);
 
 

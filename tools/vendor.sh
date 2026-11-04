@@ -40,8 +40,8 @@
 
 set -euo pipefail
 
-MIZU_PIN="7efb986e4af9c1778a2376baf4951bfddb10e5cd"    # mizu: Vendor libmizu 6c87ad3 (const getters record through the error shadow)
-LIBMIZU_PIN="6c87ad3cdef71f6793975e6492395266f27dc281" # libmizu: Record the const snapshot getters through the error shadow; bound the split-threads test's window
+MIZU_PIN="d1d28f12e2367b8d4e1e253480cbd9722a7825e4"    # mizu: mizu 0.1.0
+LIBMIZU_PIN="5012d52cf7dfe5e3adb28288b51423d742b1cbb7" # libmizu: libmizu 0.1.0
 MIZU_REPO="${MIZU_REPO:-https://github.com/shikokuchuo/mizu}"
 LIBMIZU_REPO="${LIBMIZU_REPO:-https://github.com/shikokuchuo/libmizu}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/src"
