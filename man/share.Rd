@@ -70,6 +70,14 @@ sum(x)
 lst <- share(list(a = 1:3, b = letters))
 is_shared(lst)
 
+# With mizu installed, shared objects reach pool workers as references:
+if (requireNamespace("mizu", quietly = TRUE)) {
+  p <- mizu::mizu_pool(2L)
+  m <- mizu::mizu_map(p, lst, \(v) mori::is_shared(v), .template = logical(1))
+  mizu::mizu_collect(m)
+  mizu::mizu_pool_stop(p)
+}
+
 }
 \seealso{
 \code{\link[=map_shared]{map_shared()}} to open a shared region by name,
