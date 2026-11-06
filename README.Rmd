@@ -196,6 +196,39 @@ Copy-on-write makes sure that other processes continue to read the original shar
 - **Modifying values** of a shared vector (for example, `X[1] <- 0`) materializes only that vector into a private copy.
   Other vectors in the same shared region stay zero-copy.
 
+## mori and mizu
+
+[mizu](https://shikokuchuo.net/mizu/) builds a complete async and parallel framework over the same shared-memory core.
+
+mori-shared objects travel through mizu tasks as references.
+Workers map the same physical pages — nothing is copied onto the pool, at any data size:
+
+```{r}
+#| label: mizu
+library(mizu)
+
+p <- mizu_pool(4)
+
+# The 200 MB data frame shared above reaches the pool as a reference:
+t <- mizu_submit(p, format(lobstr::obj_size(shared_df)), shared_df = shared_df)
+mizu_collect(t)
+
+# A parallel map over its columns reads the same shared pages on each worker:
+m <- mizu_map(p, shared_df, \(col) mean(col), .template = numeric(1))
+mizu_collect(m)
+
+mizu_pool_stop(p)
+```
+
+### When mori, even with mizu
+
+Use mizu when you want the framework: task pools with sub-microsecond round trips, `mizu_map()`, channels, `promises` integration for Shiny, reproducible parallel RNG, and Python workers.
+
+mori remains the right choice when:
+
+- You have a parallel stack already. A mori shared object works for any `serialize()` pathway — mirai, parallel, callr, future.
+- Data must outlive a pool. A mori region is named and lives until R's garbage collector frees the last reference. Any process on the machine can map it by name.
+
 --
 
 The mori project is released with a [Contributor Code of Conduct](https://mori.r-lib.org/CODE_OF_CONDUCT.html).
