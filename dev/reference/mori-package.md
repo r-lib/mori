@@ -8,6 +8,17 @@ using R's ALTREP framework for zero-copy memory-mapped access. Shared
 objects serialize compactly via ALTREP serialization hooks. Shared
 memory is automatically freed when the R object is garbage collected.
 
+## mori and mizu
+
+The mizu package provides a complete async and parallel framework over
+the same shared-memory core — task pools, a parallel map, channels, and
+Python interop. Objects created by
+[`share()`](https://mori.r-lib.org/dev/reference/share.md) travel
+through mizu tasks as zero-copy references. mori remains the right
+choice when a parallel backend such as mirai or parallel is already in
+place, or when data must be mapped by name between independent processes
+or outlive any pool.
+
 ## See also
 
 Useful links:

@@ -76,12 +76,12 @@ boot_mean <- \(i, data) colMeans(data[sample(nrow(data), replace = TRUE), ])
 # Without mori — each daemon deserializes a full copy
 mirai_map(1:8, boot_mean, .args = list(data = df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.622  12.886   8.502
+#>   0.613  11.691   8.504
 
 # With mori — each daemon maps the same shared memory
 mirai_map(1:8, boot_mean, .args = list(data = shared_df))[] |> system.time()
 #>    user  system elapsed 
-#>   0.002   0.003   4.970
+#>   0.001   0.002   4.389
 
 daemons(0)
 ```
@@ -103,7 +103,7 @@ without serialization:
 x <- share(rnorm(1e6))
 
 shared_name(x)
-#> [1] "/mori_bef7_c2c388b5"
+#> [1] "/mori_615b_f436100d"
 ```
 
 ``` r
@@ -172,9 +172,9 @@ strings load on demand, one element at a time.
 
 df <- share(as.data.frame(matrix(rnorm(1e7), ncol = 100)))
 shared_name(df)        # one region for all 100 columns
-#> [1] "/mori_bef7_c2c388b7"
+#> [1] "/mori_615b_f436100f"
 shared_name(df[[50]])  # sub-path into the same region
-#> [1] "/mori_bef7_c2c388b7[50]"
+#> [1] "/mori_615b_f436100f[50]"
 ```
 
 ### Lifetime
@@ -209,6 +209,52 @@ other processes continue to read the original shared data:
 - **Modifying values** of a shared vector (for example, `X[1] <- 0`)
   materializes only that vector into a private copy. Other vectors in
   the same shared region stay zero-copy.
+
+## mori and mizu
+
+[mizu](https://shikokuchuo.net/mizu/) builds a complete async and
+parallel framework over the same shared-memory core.
+
+mori-shared objects travel through mizu tasks as references. Workers map
+the same physical pages — nothing is copied onto the pool, at any data
+size:
+
+``` r
+
+library(mizu)
+
+p <- mizu_pool(4)
+
+# The 200 MB data frame shared above reaches the pool as a reference:
+t <- mizu_submit(p, format(lobstr::obj_size(shared_df)), shared_df = shared_df)
+mizu_collect(t)
+#> [1] "824 B"
+
+# A parallel map over its columns reads the same shared pages on each worker:
+m <- mizu_map(p, shared_df, \(col) mean(col), .template = numeric(1))
+mizu_collect(m)
+#>            V1            V2            V3            V4            V5 
+#>  0.0007697908 -0.0007094785 -0.0007802216  0.0003363780 -0.0003906289
+
+mizu_pool_stop(p)
+```
+
+### When mori, even with mizu
+
+Use mizu when you want the framework: task pools with sub-microsecond
+round trips,
+[`mizu_map()`](https://shikokuchuo.net/mizu/reference/mizu_map.html),
+channels, `promises` integration for Shiny, reproducible parallel RNG,
+and Python workers.
+
+mori remains the right choice when:
+
+- You have a parallel stack already. A mori shared object works for any
+  [`serialize()`](https://rdrr.io/r/base/serialize.html) pathway —
+  mirai, parallel, callr, future.
+- Data must outlive a pool. A mori region is named and lives until R’s
+  garbage collector frees the last reference. Any process on the machine
+  can map it by name.
 
 –
 

@@ -57,6 +57,18 @@ when the R object is garbage collected.</p>
 
 
     <div class="section level2">
+    <h2 id="mori-and-mizu">mori and mizu<a class="anchor" aria-label="anchor" href="#mori-and-mizu"></a></h2>
+
+
+<p>The <span class="pkg">mizu</span> package provides a complete async and parallel framework
+over the same shared-memory core — task pools, a parallel map, channels,
+and Python interop. Objects created by <code><a href="share.html">share()</a></code> travel through mizu
+tasks as zero-copy references. mori remains the right choice when a
+parallel backend such as mirai or parallel is already in place, or when
+data must be mapped by name between independent processes or outlive
+any pool.</p>
+    </div>
+    <div class="section level2">
     <h2 id="see-also">See also<a class="anchor" aria-label="anchor" href="#see-also"></a></h2>
     <div class="dont-index"><p>Useful links:</p><ul><li><p><a href="https://mori.r-lib.org">https://mori.r-lib.org</a></p></li>
 <li><p><a href="https://github.com/r-lib/mori" class="external-link">https://github.com/r-lib/mori</a></p></li>

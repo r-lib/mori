@@ -85,4 +85,12 @@ sum(x)
 lst <- share(list(a = 1:3, b = letters))
 is_shared(lst)
 #> [1] TRUE
+
+# With mizu installed, shared objects reach pool workers as references:
+if (requireNamespace("mizu", quietly = TRUE)) {
+  p <- mizu::mizu_pool(2L)
+  m <- mizu::mizu_map(p, lst, \(v) mori::is_shared(v), .template = logical(1))
+  mizu::mizu_collect(m)
+  mizu::mizu_pool_stop(p)
+}
 ```
